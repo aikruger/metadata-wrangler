@@ -150,25 +150,25 @@
 .field-source-badge {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  font-size: 0.65em;
+  padding: 1px 4px;
+  border-radius: var(--radius-s);
+  font-size: 0.7em;
   font-weight: var(--font-semibold);
+  font-family: var(--font-monospace);
   flex-shrink: 0;
+  border: 1px solid transparent;
 }
 
-.field-source-badge.p {
-  background: var(--background-modifier-success);
-  border: 1px solid var(--background-modifier-success);
-  color: var(--text-success);
+.field-source-badge.badge-p {
+  background: color-mix(in srgb, var(--color-green) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-green) 40%, transparent);
+  color: var(--color-green);
 }
 
-.field-source-badge.i {
-  background: var(--background-modifier-error);
-  border: 1px solid var(--background-modifier-error);
-  color: var(--text-error);
+.field-source-badge.badge-i {
+  background: color-mix(in srgb, var(--color-orange) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-orange) 40%, transparent);
+  color: var(--color-orange);
 }
 
 /* ── Field type badges ───────────────────────────────────────────────────── */
@@ -232,6 +232,11 @@
   color: var(--text-muted);
   font-style: italic;
   text-align: center;
+}
+
+/* ── Hidden utility ──────────────────────────────────────────────────────── */
+.pw-hidden {
+  display: none !important;
 }
 
 /* ── Modal ───────────────────────────────────────────────────────────────── */
@@ -454,4 +459,59 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* ── Rename scope section ────────────────────────────────────────────────── */
+.pw-scope-section {
+  margin-top: 8px;
+}
+
+.pw-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.pw-folder-input {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  box-sizing: border-box;
+}
+
+.pw-folder-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* ── Type change section ─────────────────────────────────────────────────── */
+.pw-type-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 10px 12px;
+  background: var(--background-secondary);
+}
+
+.pw-type-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.pw-type-select {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
 }

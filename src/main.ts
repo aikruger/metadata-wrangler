@@ -34,6 +34,9 @@ const VIEW_TYPE = 'metadata-wrangler-view';
 /** Matches Dataview-style inline fields: `key:: value` */
 const INLINE_FIELD_RE = /^([A-Za-z0-9_][A-Za-z0-9_\- ]*)::\s*(.+?)\s*$/;
 
+/** Valid Obsidian/Dataview property types for the type-change dropdown */
+const PROPERTY_TYPES: FieldType[] = ['text', 'number', 'checkbox', 'date', 'datetime', 'list'];
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
@@ -72,6 +75,36 @@ function detectTypeFromString(s: string): FieldType {
 	if (DATE_RE.test(s)) return 'date';
 	if (s.trim() !== '' && !isNaN(Number(s))) return 'number';
 	return 'text';
+}
+
+/**
+ * Extracts inline fields from a single line, handling:
+ *  - Normal lines:          `key:: value`
+ *  - Callout/blockquote:   `> key:: value`
+ *  - Table cells:           `| key:: value |`
+ */
+function extractInlineFieldsFromLine(line: string): Array<{ name: string; val: string }> {
+	const results: Array<{ name: string; val: string }> = [];
+
+	// Strip leading blockquote / callout markers (handles nested: "> > ")
+	const stripped = line.replace(/^(?:>\s*)+/, '');
+
+	// For table rows, examine each pipe-delimited cell separately
+	if (stripped.includes('|')) {
+		for (const cell of stripped.split('|')) {
+			const m = INLINE_FIELD_RE.exec(cell.trim());
+			if (m != null && m[1] != null && m[2] != null) {
+				results.push({ name: m[1].trim(), val: m[2].trim() });
+			}
+		}
+	} else {
+		const m = INLINE_FIELD_RE.exec(stripped);
+		if (m != null && m[1] != null && m[2] != null) {
+			results.push({ name: m[1].trim(), val: m[2].trim() });
+		}
+	}
+
+	return results;
 }
 
 // ─── Indexing ─────────────────────────────────────────────────────────────────
@@ -131,10 +164,7 @@ async function buildIndex(app: App): Promise<Map<string, FieldInfo>> {
 		const fmEnd = getFrontmatterEnd(content);
 		const body = content.slice(fmEnd);
 		for (const line of body.split('\n')) {
-			const m = INLINE_FIELD_RE.exec(line);
-			if (m != null && m[1] != null && m[2] != null) {
-				const name = m[1].trim();
-				const val = m[2].trim();
+			for (const { name, val } of extractInlineFieldsFromLine(line)) {
 				const field = upsert(`il::${name}`, name, 'inline');
 				field.files.add(file.path);
 				addVal(field, val, file.path);
@@ -536,10 +566,10 @@ class MetadataWranglerView extends ItemView {
 		}
 		for (const field of fields) {
 			const row = container.createDiv({ cls: 'pw-field-row' });
-			// Source badge (p or i) next to each result entry
+			// Source badge (p) or (i) next to each result entry
 			row.createEl('span', {
-				cls: `field-source-badge ${field.source === 'frontmatter' ? 'p' : 'i'}`,
-				text: field.source === 'frontmatter' ? 'p' : 'i',
+				cls: `field-source-badge ${field.source === 'frontmatter' ? 'badge-p' : 'badge-i'}`,
+				text: field.source === 'frontmatter' ? '(p)' : '(i)',
 				title: field.source === 'frontmatter' ? 'Frontmatter property' : 'Inline field',
 			});
 			// Field type badge next to source badge
@@ -599,8 +629,41 @@ class FieldEditModal extends Modal {
 			cls: 'pw-btn pw-btn-primary',
 			text: 'Rename',
 		});
+
+		// Folder scope for rename
+		let scopeMode: 'all' | 'folder' = 'all';
+		let scopeFolder = '';
+
+		const scopeSection = renameSection.createDiv({ cls: 'pw-scope-section' });
+		scopeSection.createEl('label', { cls: 'pw-label', text: 'Apply rename to:' });
+		const scopeRow = scopeSection.createDiv({ cls: 'pw-scope-row' });
+
+		const folderInput = scopeSection.createEl('input', {
+			cls: 'pw-folder-input',
+			type: 'text',
+			placeholder: 'Folder path, e.g. notes/work',
+		});
+		folderInput.addClass('pw-hidden');
+
+		(['all', 'folder'] as const).forEach((val) => {
+			const lbl = scopeRow.createEl('label', { cls: 'pw-radio-label' });
+			const radio = lbl.createEl('input', { type: 'radio' });
+			radio.name = 'pw-rename-scope';
+			radio.value = val;
+			radio.checked = val === 'all';
+			lbl.createEl('span', { text: val === 'all' ? 'All files' : 'Specific folder:' });
+			radio.addEventListener('change', () => {
+				if (radio.checked) {
+					scopeMode = val;
+					folderInput.toggleClass('pw-hidden', val !== 'folder');
+				}
+			});
+		});
+
+		folderInput.addEventListener('input', () => { scopeFolder = folderInput.value.trim(); });
+
 		renameBtn.addEventListener('click', () => {
-			void this.handleRename(nameInput.value);
+			void this.handleRename(nameInput.value, scopeMode, scopeFolder);
 		});
 
 		// Values section
@@ -608,9 +671,48 @@ class FieldEditModal extends Modal {
 		const valuesContainer = contentEl.createDiv({ cls: 'pw-values-container' });
 		this.renderValues(valuesContainer);
 
+		// Type change section
+		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Property type' });
+		this.renderTypeSection(contentEl);
+
 		// Convert / Copy section
 		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Convert / copy' });
 		this.renderConvertSection(contentEl);
+	}
+
+	private renderTypeSection(container: HTMLElement): void {
+		const section = container.createDiv({ cls: 'pw-type-section' });
+		const typeRow = section.createDiv({ cls: 'pw-type-row' });
+		const typeSelect = typeRow.createEl('select', { cls: 'pw-type-select' });
+		for (const t of PROPERTY_TYPES) {
+			const option = typeSelect.createEl('option', { value: t, text: t });
+			if (t === this.field.fieldType) option.selected = true;
+		}
+		const applyBtn = typeRow.createEl('button', {
+			cls: 'pw-btn pw-btn-primary',
+			text: 'Apply type',
+		});
+		applyBtn.addEventListener('click', () => {
+			void this.handleChangeType(typeSelect.value as FieldType);
+		});
+	}
+
+	private async handleChangeType(newType: FieldType): Promise<void> {
+		if (newType === this.field.fieldType) return;
+		if (this.field.source === 'frontmatter') {
+			// 'unknown' is not selectable but required to satisfy Record<FieldType, string>
+			const typeMap: Record<FieldType, string> = {
+				text: 'text', number: 'number', checkbox: 'checkbox',
+				date: 'date', datetime: 'datetime', list: 'multitext', unknown: 'text',
+			};
+			type MetadataTypeManager = { setType: (name: string, type: string) => void };
+			const mtm = (this.app as App & { metadataTypeManager?: MetadataTypeManager }).metadataTypeManager;
+			if (mtm) mtm.setType(this.field.name, typeMap[newType]);
+		}
+		this.field.fieldType = newType;
+		new Notice(`Changed type of "${this.field.name}" to "${newType}"`);
+		this.close();
+		this.onRefresh();
 	}
 
 	private renderConvertSection(container: HTMLElement): void {
@@ -678,10 +780,16 @@ class FieldEditModal extends Modal {
 		this.onRefresh();
 	}
 
-	private async handleRename(newName: string): Promise<void> {
+	private async handleRename(newName: string, scopeMode: 'all' | 'folder' = 'all', scopeFolder = ''): Promise<void> {
 		const trimmed = newName.trim();
 		if (!trimmed || trimmed === this.field.name) return;
-		const files = [...this.field.files];
+		let files = [...this.field.files];
+		if (scopeMode === 'folder' && scopeFolder) {
+			// Obsidian vault paths always use forward slashes
+			const normalised = scopeFolder.replace(/\\/g, '/');
+			const prefix = normalised.endsWith('/') ? normalised : `${normalised}/`;
+			files = files.filter((p) => p.startsWith(prefix));
+		}
 		if (this.field.source === 'frontmatter') {
 			await renameFrontmatterKey(this.app, files, this.field.name, trimmed);
 		} else {
