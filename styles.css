@@ -1,8 +1,457 @@
-/*
+/* metadata wrangler plugin styles */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+/* ── View container ──────────────────────────────────────────────────────── */
+.property-wrangler-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
+  font-size: var(--font-ui-small);
+}
 
-If your plugin does not need CSS, delete this file.
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.pw-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
 
-*/
+.pw-title {
+  font-weight: var(--font-semibold);
+  font-size: var(--font-ui-medium);
+  color: var(--text-normal);
+}
+
+.pw-refresh-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 1.1em;
+  padding: 2px 6px;
+  border-radius: var(--radius-s);
+  transition: color 0.15s, background 0.15s;
+}
+
+.pw-refresh-btn:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+/* ── Loading ─────────────────────────────────────────────────────────────── */
+.pw-loading {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Search ──────────────────────────────────────────────────────────────── */
+.pw-search-row {
+  padding: 8px 12px 4px;
+  flex-shrink: 0;
+}
+
+.pw-search {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  box-sizing: border-box;
+}
+
+.pw-search:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* ── Filter controls ─────────────────────────────────────────────────────── */
+.property-filters {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 12px 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.field-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  user-select: none;
+}
+
+.field-filter input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+/* ── Stats bar ───────────────────────────────────────────────────────────── */
+.pw-stats {
+  padding: 2px 12px 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* ── Field list ──────────────────────────────────────────────────────────── */
+.pw-field-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.pw-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  border-radius: var(--radius-s);
+  margin: 0 4px;
+  transition: background 0.1s;
+}
+
+.pw-field-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pw-field-name {
+  flex: 1;
+  font-weight: var(--font-medium);
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.pw-field-stats {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ── Source badges ───────────────────────────────────────────────────────── */
+.field-source-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 0.65em;
+  font-weight: var(--font-semibold);
+  flex-shrink: 0;
+}
+
+.field-source-badge.p {
+  background: var(--background-modifier-success);
+  border: 1px solid var(--background-modifier-success);
+  color: var(--text-success);
+}
+
+.field-source-badge.i {
+  background: var(--background-modifier-error);
+  border: 1px solid var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+/* ── Field type badges ───────────────────────────────────────────────────── */
+.pw-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: var(--radius-s);
+  font-size: 0.65em;
+  font-weight: var(--font-semibold);
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+}
+
+.pw-type-text {
+  background: var(--background-secondary);
+  border-color: var(--background-modifier-border);
+  color: var(--text-muted);
+}
+
+.pw-type-number {
+  background: color-mix(in srgb, var(--color-blue) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-blue) 40%, transparent);
+  color: var(--color-blue);
+}
+
+.pw-type-checkbox {
+  background: color-mix(in srgb, var(--color-green) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-green) 40%, transparent);
+  color: var(--color-green);
+}
+
+.pw-type-date {
+  background: color-mix(in srgb, var(--color-purple) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-purple) 40%, transparent);
+  color: var(--color-purple);
+}
+
+.pw-type-datetime {
+  background: color-mix(in srgb, var(--color-purple) 20%, transparent);
+  border-color: color-mix(in srgb, var(--color-purple) 50%, transparent);
+  color: var(--color-purple);
+}
+
+.pw-type-list {
+  background: color-mix(in srgb, var(--color-orange) 15%, transparent);
+  border-color: color-mix(in srgb, var(--color-orange) 40%, transparent);
+  color: var(--color-orange);
+}
+
+.pw-type-unknown {
+  background: var(--background-secondary);
+  border-color: var(--background-modifier-border);
+  color: var(--text-faint);
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.pw-empty {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+/* ── Modal ───────────────────────────────────────────────────────────────── */
+.pw-modal {
+  min-width: 440px;
+}
+
+.pw-modal-title {
+  margin: 0 0 6px;
+  font-size: var(--font-ui-large);
+}
+
+.pw-source-info {
+  margin: 0 0 14px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+}
+
+.pw-rename-section {
+  margin-bottom: 16px;
+}
+
+.pw-label {
+  display: block;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.pw-rename-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pw-name-input,
+.pw-edit-input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.pw-name-input:focus,
+.pw-edit-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.pw-section-title {
+  margin: 16px 0 8px;
+  font-size: var(--font-ui-medium);
+}
+
+/* ── Values container ────────────────────────────────────────────────────── */
+.pw-values-container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.pw-value-row {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 6px 10px;
+  background: var(--background-secondary);
+}
+
+.pw-value-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.pw-value-text {
+  flex: 1;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  word-break: break-all;
+}
+
+.pw-value-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.pw-edit-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+/* ── File list ───────────────────────────────────────────────────────────── */
+.pw-file-list {
+  margin: 4px 0 0;
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 4px;
+}
+
+.pw-file-list.pw-hidden {
+  display: none;
+}
+
+.pw-file-entry {
+  padding: 2px 0;
+}
+
+.pw-file-link {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-accent);
+  cursor: pointer;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.pw-file-link:hover {
+  text-decoration: underline;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.pw-btn {
+  padding: 4px 10px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+
+.pw-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.pw-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pw-btn-primary {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.pw-btn-primary:hover {
+  background: var(--interactive-accent-hover);
+  border-color: var(--interactive-accent-hover);
+}
+
+.pw-btn-secondary {
+  background: var(--background-primary);
+}
+
+.pw-btn-ghost {
+  background: none;
+  border-color: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.pw-btn-ghost:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.pw-btn-danger {
+  color: var(--text-error);
+  border-color: var(--background-modifier-error);
+}
+
+.pw-btn-danger:hover {
+  background: var(--background-modifier-error);
+  color: var(--text-on-accent);
+}
+
+/* ── Convert / Copy section ──────────────────────────────────────────────── */
+.pw-convert-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 10px 12px;
+  background: var(--background-secondary);
+}
+
+.pw-convert-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.pw-radio-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+
+.pw-radio-label input[type="radio"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.pw-convert-action-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
