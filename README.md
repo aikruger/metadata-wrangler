@@ -48,3 +48,32 @@ npm run dev    # watch mode
 npm run build  # production build
 npm run lint   # lint
 ```
+
+## Dataview Query Compatibility
+
+Because each definition is stored as a standard Markdown note in the user's vault with frontmatter fields (`name`, `description`, `aliases`, `group`, `subgroup`, `sourceScope`), Dataview can query them immediately.
+
+**Plain Dataview:**
+```text
+TABLE name, group, subgroup, description
+FROM "metadata"
+SORT group, name ASC
+```
+
+**Grouped by group:**
+```text
+TABLE name, subgroup, description
+FROM "metadata"
+WHERE group = "Project"
+SORT subgroup, name ASC
+```
+
+**DataviewJS using the plugin API:**
+```text
+const mw = app.plugins.plugins["metadata-wrangler"]?.api;
+const defs = mw?.getAllFieldDefinitions() ?? [];
+dv.table(
+  ["Field", "Group", "Subgroup", "Description"],
+  defs.map(d => [d.name, d.group, d.subgroup, d.description])
+);
+```

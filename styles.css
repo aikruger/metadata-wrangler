@@ -455,3 +455,91 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* ── Definition section ──────────────────────────────────────────────────── */
+.pw-definition-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: 10px 12px;
+  background: var(--background-secondary);
+  margin-bottom: 12px;
+}
+
+.pw-def-textarea {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-family: var(--font-interface);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.pw-def-textarea:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* ── Group badge ─────────────────────────────────────────────────────────── */
+.pw-group-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  font-size: 0.6em;
+  font-weight: var(--font-semibold);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 30%, transparent);
+  color: var(--interactive-accent);
+  white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+/* ── Suggester items ─────────────────────────────────────────────────────── */
+.pw-suggester-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+}
+
+.pw-suggester-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pw-suggester-alias,
+.pw-suggester-desc {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* ── Editor tooltip ──────────────────────────────────────────────────────── */
+.pw-editor-tooltip {
+  padding: 8px 10px;
+  max-width: 320px;
+  font-size: var(--font-ui-small);
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow-s);
+  color: var(--text-normal);
+}
+
+.pw-tooltip-group {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.pw-tooltip-desc {
+  margin: 4px 0 0;
+  color: var(--text-normal);
+}
