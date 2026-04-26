@@ -303,6 +303,28 @@ async function updateInlineValue(
 	}
 }
 
+async function deleteEntireFrontmatterKey(app: App, filePath: string, key: string) {
+  const file = app.vault.getAbstractFileByPath(filePath);
+  if (!(file instanceof TFile)) return;
+  await app.fileManager.processFrontMatter(file, fm => {
+    delete fm[key];
+  });
+}
+
+async function deleteAllInlineOccurrences(app: App, filePaths: string[], key: string) {
+  const pattern = new RegExp(`^${escapeRegex(key)}::[ \\t]*.*$\\n?`, 'gm');
+  for (const path of filePaths) {
+    const file = app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) continue;
+    const content = await app.vault.read(file);
+    const fmEnd = getFrontmatterEnd(content);
+    const body = content.slice(fmEnd).replace(pattern, '');
+    if (body !== content.slice(fmEnd)) {
+      await app.vault.modify(file, content.slice(0, fmEnd) + body);
+    }
+  }
+}
+
 async function deleteInlineValue(
 	app: App,
 	files: string[],
@@ -549,7 +571,26 @@ class DefinitionStore {
     }
   }
 
-  private toSlug(name: string): string {
+  async deleteDefinition(fieldName: string): Promise<boolean> {
+    const key = fieldName.toLowerCase();
+    const def = this.cache.get(key);
+    if (!def) return false;
+    const file = this.app.vault.getAbstractFileByPath(def.filePath);
+    if (file instanceof TFile) {
+      await this.app.vault.trash(file, true);
+    }
+    this.cache.delete(key);
+    return true;
+  }
+
+  async deleteDefinitionByPath(filePath: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (file instanceof TFile) {
+      await this.app.vault.trash(file, true);
+    }
+  }
+
+  toSlug(name: string): string {
     return name
       .toLowerCase()
       .replace(/\s+/g, '-')
@@ -561,6 +602,24 @@ class DefinitionStore {
 
 // ─── View ─────────────────────────────────────────────────────────────────────
 
+let activeSidebarTooltip: HTMLElement | null = null;
+
+function hideSidebarTooltip() {
+	if (activeSidebarTooltip) {
+		activeSidebarTooltip.remove();
+		activeSidebarTooltip = null;
+	}
+}
+
+function showSidebarTooltip(anchor: HTMLElement, def: FieldDefinition, plugin: MetadataWranglerPlugin) {
+	hideSidebarTooltip();
+	activeSidebarTooltip = buildTooltipDom(def.name, def, true);
+	document.body.appendChild(activeSidebarTooltip);
+	activeSidebarTooltip.style.visibility = 'hidden';
+	positionTooltip(activeSidebarTooltip, anchor);
+	activeSidebarTooltip.style.visibility = 'visible';
+}
+
 class MetadataWranglerView extends ItemView {
 	private plugin: MetadataWranglerPlugin;
 	index: Map<string, FieldInfo> = new Map();
@@ -569,6 +628,7 @@ class MetadataWranglerView extends ItemView {
 	private showFrontmatter = true;
 	private showInline = true;
 	private listContainer: HTMLElement | null = null;
+	private _keyUpHandler: (e: KeyboardEvent) => void;
 
 	constructor(leaf: WorkspaceLeaf, plugin: MetadataWranglerPlugin) {
 		super(leaf);
@@ -581,10 +641,16 @@ class MetadataWranglerView extends ItemView {
 	getIcon(): string { return 'list-plus'; }
 
 	async onOpen(): Promise<void> {
+		this._keyUpHandler = (e: KeyboardEvent) => {
+			if (e.key === this.plugin.settings.tooltipModifierKey) hideSidebarTooltip();
+		};
+		window.addEventListener('keyup', this._keyUpHandler);
 		await this.refresh();
 	}
 
-	async onClose(): Promise<void> { /* nothing to clean up */ }
+	async onClose(): Promise<void> {
+		window.removeEventListener('keyup', this._keyUpHandler);
+	}
 
 	async refresh(): Promise<void> {
 		this.loading = true;
@@ -738,11 +804,14 @@ class MetadataWranglerView extends ItemView {
 			if (this.plugin.settings.enableSidebarTooltips) {
 			  const def = this.plugin.definitionStore.resolve(field.name);
 			  if (def) {
-			    const parts: string[] = [];
-			    if (def.description) parts.push(def.description);
-			    if (def.aliases.length > 0) parts.push(`Aliases: ${def.aliases.join(', ')}`);
-			    if (def.group) parts.push(`Group: ${def.group}${def.subgroup ? ' › ' + def.subgroup : ''}`);
-			    if (parts.length > 0) row.title = parts.join('\n');
+			    row.setAttribute('data-has-def', 'true');
+			    row.addEventListener('mouseenter', (e) => {
+			      if (!this.plugin.modifierHeld) return;
+			      showSidebarTooltip(row, def, this.plugin);
+			    });
+			    row.addEventListener('mouseleave', () => {
+			      hideSidebarTooltip();
+			    });
 			    // Optionally render a small group badge after the field name span
 			    if (def.group) {
 			      row.createEl('span', {
@@ -755,6 +824,44 @@ class MetadataWranglerView extends ItemView {
 			}
 		}
 	}
+}
+
+// ─── Confirm Modal ────────────────────────────────────────────────────────────
+
+class ConfirmModal extends Modal {
+	constructor(app: App, private title: string, private body: string, private onResolve: (confirmed: boolean) => void) {
+		super(app);
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h2', { text: this.title });
+		contentEl.createEl('p', { text: this.body });
+
+		const row = contentEl.createDiv({ cls: 'pw-rename-row' });
+		const confirmBtn = row.createEl('button', { cls: 'pw-btn pw-btn-danger', text: 'Confirm' });
+		const cancelBtn = row.createEl('button', { cls: 'pw-btn', text: 'Cancel' });
+
+		confirmBtn.addEventListener('click', () => {
+			this.onResolve(true);
+			this.close();
+		});
+		cancelBtn.addEventListener('click', () => {
+			this.onResolve(false);
+			this.close();
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+function confirmDialog(app: App, title: string, body: string): Promise<boolean> {
+	return new Promise(resolve => {
+		const m = new ConfirmModal(app, title, body, resolve);
+		m.open();
+	});
 }
 
 // ─── Field Edit Modal ─────────────────────────────────────────────────────────
@@ -876,6 +983,66 @@ class FieldEditModal extends Modal {
 		// Convert / Copy section
 		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Convert / copy' });
 		this.renderConvertSection(contentEl);
+
+		// Danger zone
+		contentEl.createEl('h3', { cls: 'pw-section-title pw-danger-title', text: 'Danger zone' });
+		const dangerSection = contentEl.createDiv({ cls: 'pw-danger-section' });
+
+		const deleteFieldBtn = dangerSection.createEl('button', {
+		  cls: 'pw-btn pw-btn-danger',
+		  text: 'Delete field from all notes'
+		});
+
+		deleteFieldBtn.addEventListener('click', () => {
+			void this.handleDeleteField();
+		});
+
+		if (existingDef) {
+			const deleteDefBtn = dangerSection.createEl('button', {
+			  cls: 'pw-btn pw-btn-danger-outline',
+			  text: 'Delete definition only'
+			});
+			deleteDefBtn.addEventListener('click', () => {
+				void this.handleDeleteDefinitionOnly();
+			});
+		}
+	}
+
+	private async handleDeleteField() {
+	  const confirmed = await confirmDialog(
+		this.app,
+	    `Delete field "${this.field.name}" from all ${this.field.files.size} file(s)?`,
+	    'This will remove all values for this field from frontmatter and inline. This cannot be undone.'
+	  );
+	  if (!confirmed) return;
+	  const files = [...this.field.files];
+	  if (this.field.source === 'frontmatter') {
+	    for (const path of files) {
+	      await deleteEntireFrontmatterKey(this.app, path, this.field.name);
+	    }
+	  } else {
+	    await deleteAllInlineOccurrences(this.app, files, this.field.name);
+	  }
+	  const hadDef = await this.plugin.definitionStore.deleteDefinition(this.field.name);
+	  const defNote = hadDef ? ' Definition note also deleted.' : '';
+	  new Notice(`Deleted field "${this.field.name}" from ${files.length} file(s).${defNote}`);
+	  this.close();
+	  this.onRefresh();
+	}
+
+	private async handleDeleteDefinitionOnly() {
+	  const def = this.plugin.definitionStore.resolve(this.field.name);
+	  if (!def) { new Notice('No definition exists for this field.'); return; }
+	  const confirmed = await confirmDialog(
+		this.app,
+	    `Delete definition for "${this.field.name}"?`,
+	    `This removes the definition note at "${def.filePath}" but leaves field occurrences in notes untouched.`
+	  );
+	  if (!confirmed) return;
+	  await this.plugin.definitionStore.deleteDefinition(this.field.name);
+	  new Notice(`Definition for "${this.field.name}" deleted.`);
+	  this.close();
+	  this.onRefresh();
 	}
 
 	private renderConvertSection(container: HTMLElement): void {
@@ -968,6 +1135,19 @@ class FieldEditModal extends Modal {
 		} else {
 			await renameInlineKey(this.app, files, this.field.name, trimmed);
 		}
+
+			const def = this.plugin.definitionStore.resolve(this.field.name);
+			if (def) {
+			  const renamedDef = { ...def, name: trimmed };
+			  await this.plugin.definitionStore.save(renamedDef);
+			  // Only delete old def file if slug changed
+			  const oldSlug = this.plugin.definitionStore.toSlug(this.field.name);
+			  const newSlug = this.plugin.definitionStore.toSlug(trimmed);
+			  if (oldSlug !== newSlug) {
+			    await this.plugin.definitionStore.deleteDefinitionByPath(def.filePath);
+			  }
+			}
+
 		new Notice(`Renamed "${this.field.name}" → "${trimmed}"`);
 		this.close();
 		this.onRefresh();
@@ -1208,12 +1388,102 @@ class InlineFieldSuggester extends FuzzySuggestModal<SuggestItem> {
   }
 }
 
+// ─── Tooltip UI Helpers ───────────────────────────────────────────────────────
+
+function buildTooltipDom(fieldName: string, def: FieldDefinition, isSidebar = false): HTMLElement {
+  const dom = document.createElement('div');
+  dom.addClass(isSidebar ? 'pw-sidebar-tooltip' : 'pw-editor-tooltip');
+  dom.createEl('strong', { text: fieldName });
+  if (def.group) {
+    dom.createEl('span', {
+      cls: 'pw-tooltip-group',
+      text: ` [${def.group}${def.subgroup ? ' › ' + def.subgroup : ''}]`,
+    });
+  }
+  if (def.description) {
+    dom.createEl('p', { cls: 'pw-tooltip-desc', text: def.description });
+  }
+  if (def.aliases.length > 0) {
+    dom.createEl('small', { text: `Aliases: ${def.aliases.join(', ')}` });
+  }
+  return dom;
+}
+
+function positionTooltip(tooltipEl: HTMLElement, anchorEl: HTMLElement) {
+  const rect = anchorEl.getBoundingClientRect();
+  const scrollY = window.scrollY;
+  tooltipEl.style.position = 'fixed';
+  tooltipEl.style.zIndex = '10000';
+  tooltipEl.style.top = `${rect.top - tooltipEl.offsetHeight - 8}px`;
+  tooltipEl.style.left = `${Math.max(8, rect.left)}px`;
+  tooltipEl.style.maxWidth = '320px';
+}
+
+let activePropertiesTooltip: HTMLElement | null = null;
+
+function hidePropertiesTooltip() {
+	if (activePropertiesTooltip) {
+		activePropertiesTooltip.remove();
+		activePropertiesTooltip = null;
+	}
+}
+
+function showPropertiesTooltip(anchor: HTMLElement, def: FieldDefinition) {
+	hidePropertiesTooltip();
+	activePropertiesTooltip = buildTooltipDom(def.name, def, false);
+	document.body.appendChild(activePropertiesTooltip);
+	activePropertiesTooltip.style.visibility = 'hidden';
+	positionTooltip(activePropertiesTooltip, anchor);
+	activePropertiesTooltip.style.visibility = 'visible';
+}
+
+function registerPropertiesHover(plugin: MetadataWranglerPlugin): () => void {
+  const handleMouseEnter = (e: MouseEvent) => {
+    if (!plugin.modifierHeld) return;
+    if (!plugin.settings.enableEditorTooltips) return;
+    const target = e.target as HTMLElement;
+    const propEl = target.closest('.metadata-property') as HTMLElement | null;
+    if (!propEl) return;
+    const keyEl = propEl.querySelector(
+      '.metadata-property-key input, .metadata-property-key'
+    ) as HTMLInputElement | HTMLElement | null;
+    if (!keyEl) return;
+    const fieldName = (keyEl as HTMLInputElement).value?.trim()
+      ?? keyEl.textContent?.trim();
+    if (!fieldName) return;
+    const def = plugin.definitionStore.resolve(fieldName);
+    if (!def || (!def.description && def.aliases.length === 0 && !def.group)) return;
+    showPropertiesTooltip(propEl, def);
+  };
+
+  const handleMouseLeave = (e: MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.metadata-property')) hidePropertiesTooltip();
+  };
+
+  const handleKeyUp = (e: KeyboardEvent) => {
+    if (e.key === plugin.settings.tooltipModifierKey) hidePropertiesTooltip();
+  };
+
+  document.addEventListener('mouseover', handleMouseEnter, true);
+  document.addEventListener('mouseout', handleMouseLeave, true);
+  window.addEventListener('keyup', handleKeyUp);
+
+  return () => {
+    document.removeEventListener('mouseover', handleMouseEnter, true);
+    document.removeEventListener('mouseout', handleMouseLeave, true);
+    window.removeEventListener('keyup', handleKeyUp);
+  };
+}
+
 // ─── Editor Hover Tooltips ────────────────────────────────────────────────────
 // Uses the CodeMirror 6 hoverTooltip extension to show field definitions
 // when hovering over "key:: value" patterns in the editor body.
 
 function buildEditorTooltipExtension(plugin: MetadataWranglerPlugin) {
   return hoverTooltip((view, pos) => {
+    if (!plugin.modifierHeld) return null;
+    if (!plugin.settings.enableEditorTooltips) return null;
     const line = view.state.doc.lineAt(pos);
     const lineText = line.text;
     const m = INLINE_FIELD_RE.exec(lineText);
@@ -1234,22 +1504,7 @@ function buildEditorTooltipExtension(plugin: MetadataWranglerPlugin) {
       end: keyEnd,
       above: true,
       create() {
-        const dom = document.createElement('div');
-        dom.addClass('pw-editor-tooltip');
-        dom.createEl('strong', { text: fieldName });
-        if (def.group) {
-          dom.createEl('span', {
-            cls: 'pw-tooltip-group',
-            text: ` [${def.group}${def.subgroup ? ' › ' + def.subgroup : ''}]`,
-          });
-        }
-        if (def.description) {
-          dom.createEl('p', { cls: 'pw-tooltip-desc', text: def.description });
-        }
-        if (def.aliases.length > 0) {
-          dom.createEl('small', { text: `Aliases: ${def.aliases.join(', ')}` });
-        }
-        return { dom };
+        return { dom: buildTooltipDom(fieldName, def) };
       },
     };
   });
@@ -1260,6 +1515,11 @@ function buildEditorTooltipExtension(plugin: MetadataWranglerPlugin) {
 export default class MetadataWranglerPlugin extends Plugin {
   settings!: MetadataWranglerSettings;
   definitionStore!: DefinitionStore;
+  modifierHeld = false;
+  private _onKeyDown: (e: KeyboardEvent) => void;
+  private _onKeyUp: (e: KeyboardEvent) => void;
+  private _unregisterPropertiesHover?: () => void;
+  private _editorExtension: any[] = [];
 
   /** Public API for DataviewJS and other plugins. */
   api = {
@@ -1274,9 +1534,19 @@ export default class MetadataWranglerPlugin extends Plugin {
     // Load definitions after layout is ready (vault is fully available).
     this.app.workspace.onLayoutReady(() => {
       void this.definitionStore.loadAll();
+      this._unregisterPropertiesHover = registerPropertiesHover(this);
     });
 
     this.registerView(VIEW_TYPE, (leaf) => new MetadataWranglerView(leaf, this));
+
+    this._onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === this.settings.tooltipModifierKey) this.modifierHeld = true;
+    };
+    this._onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === this.settings.tooltipModifierKey) this.modifierHeld = false;
+    };
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
 
     this.addRibbonIcon('list-plus', 'metadata wrangler', () => {
       void this.openView();
@@ -1299,11 +1569,24 @@ export default class MetadataWranglerPlugin extends Plugin {
     this.addSettingTab(new MetadataWranglerSettingTab(this.app, this));
 
     if (this.settings.enableEditorTooltips) {
-      this.registerEditorExtension(buildEditorTooltipExtension(this));
+      this._editorExtension = [buildEditorTooltipExtension(this)];
+      this.registerEditorExtension(this._editorExtension);
     }
   }
 
-  onunload(): void { /* nothing to clean up */ }
+  rebuildEditorExtension(): void {
+    if (this.settings.enableEditorTooltips) {
+      this._editorExtension.length = 0;
+      this._editorExtension.push(buildEditorTooltipExtension(this));
+      this.app.workspace.updateOptions();
+    }
+  }
+
+  onunload(): void {
+    window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keyup', this._onKeyUp);
+    this._unregisterPropertiesHover?.();
+  }
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());

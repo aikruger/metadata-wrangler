@@ -12,6 +12,8 @@ export interface MetadataWranglerSettings {
   enableEditorTooltips: boolean;
   /** Whether inline field insertion appends a trailing space after ":: ". */
   insertionTrailingSpace: boolean;
+  /** Hold this key while hovering to show field definition tooltips. Default: Alt. */
+  tooltipModifierKey: 'Alt' | 'Control' | 'Meta' | 'Shift';
 }
 
 export const DEFAULT_SETTINGS: MetadataWranglerSettings = {
@@ -20,6 +22,7 @@ export const DEFAULT_SETTINGS: MetadataWranglerSettings = {
   enableSidebarTooltips: true,
   enableEditorTooltips: true,
   insertionTrailingSpace: true,
+  tooltipModifierKey: 'Alt',
 };
 
 export class MetadataWranglerSettingTab extends PluginSettingTab {
@@ -46,6 +49,23 @@ export class MetadataWranglerSettingTab extends PluginSettingTab {
             this.plugin.settings.definitionFolder = value.trim() || 'metadata';
             await this.plugin.saveSettings();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName('Tooltip modifier key')
+      .setDesc('Hold this key while hovering to show field definition tooltips. Default: Alt.')
+      .addDropdown(drop =>
+        drop
+          .addOption('Alt', 'Alt')
+          .addOption('Control', 'Ctrl')
+          .addOption('Meta', 'Meta (Cmd)')
+          .addOption('Shift', 'Shift')
+          .setValue(this.plugin.settings.tooltipModifierKey)
+          .onChange(async val => {
+            this.plugin.settings.tooltipModifierKey = val as any;
+            await this.plugin.saveSettings();
+            this.plugin.rebuildEditorExtension();
+          })
       );
 
     new Setting(containerEl)

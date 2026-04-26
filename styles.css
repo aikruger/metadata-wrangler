@@ -543,3 +543,93 @@
   margin: 4px 0 0;
   color: var(--text-normal);
 }
+
+/* ── Sidebar tooltip (modifier-gated) ───────────────────────────────────── */
+.pw-sidebar-tooltip {
+  position: fixed;
+  z-index: 10000;
+  max-width: 300px;
+  padding: 8px 12px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-l);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  pointer-events: none;
+  animation: pw-tooltip-in 0.1s ease;
+}
+
+/* ── Editor + properties tooltip ────────────────────────────────────────── */
+.pw-editor-tooltip {
+  max-width: 320px;
+  padding: 8px 12px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-l);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+
+.pw-tooltip-group {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.pw-tooltip-desc {
+  margin: 4px 0 0;
+  color: var(--text-normal);
+}
+
+.pw-editor-tooltip small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+/* ── Tooltip entrance animation ─────────────────────────────────────────── */
+@keyframes pw-tooltip-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Modifier key hint in sidebar row ───────────────────────────────────── */
+.pw-field-row[data-has-def="true"]::after {
+  content: '·';
+  color: var(--text-faint);
+  font-size: 1.2em;
+  margin-left: 2px;
+  flex-shrink: 0;
+}
+
+/* ── Danger zone in modal ───────────────────────────────────────────────── */
+.pw-danger-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-error-hover);
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pw-danger-title {
+  color: var(--text-error);
+}
+
+.pw-btn-danger-outline {
+  background: transparent;
+  border: 1px solid var(--text-error);
+  color: var(--text-error);
+  padding: 4px 12px;
+  border-radius: var(--radius-s);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.pw-btn-danger-outline:hover {
+  background: var(--background-modifier-error-hover);
+}
