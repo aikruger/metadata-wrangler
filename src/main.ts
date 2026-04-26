@@ -583,10 +583,13 @@ class DefinitionStore {
     return true;
   }
 
-  async deleteDefinitionByPath(filePath: string): Promise<void> {
+  async deleteDefinitionByPath(filePath: string, oldKey?: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (file instanceof TFile) {
       await this.app.vault.trash(file, true);
+    }
+    if (oldKey) {
+      this.cache.delete(oldKey.toLowerCase());
     }
   }
 
@@ -601,24 +604,6 @@ class DefinitionStore {
 }
 
 // ─── View ─────────────────────────────────────────────────────────────────────
-
-let activeSidebarTooltip: HTMLElement | null = null;
-
-function hideSidebarTooltip() {
-	if (activeSidebarTooltip) {
-		activeSidebarTooltip.remove();
-		activeSidebarTooltip = null;
-	}
-}
-
-function showSidebarTooltip(anchor: HTMLElement, def: FieldDefinition, plugin: MetadataWranglerPlugin) {
-	hideSidebarTooltip();
-	activeSidebarTooltip = buildTooltipDom(def.name, def, true);
-	document.body.appendChild(activeSidebarTooltip);
-	activeSidebarTooltip.style.visibility = 'hidden';
-	positionTooltip(activeSidebarTooltip, anchor);
-	activeSidebarTooltip.style.visibility = 'visible';
-}
 
 class MetadataWranglerView extends ItemView {
 	private plugin: MetadataWranglerPlugin;
@@ -642,7 +627,7 @@ class MetadataWranglerView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this._keyUpHandler = (e: KeyboardEvent) => {
-			if (e.key === this.plugin.settings.tooltipModifierKey) hideSidebarTooltip();
+			if (e.key === this.plugin.settings.tooltipModifierKey) hideAllTooltips();
 		};
 		window.addEventListener('keyup', this._keyUpHandler);
 		await this.refresh();
@@ -805,12 +790,13 @@ class MetadataWranglerView extends ItemView {
 			  const def = this.plugin.definitionStore.resolve(field.name);
 			  if (def) {
 			    row.setAttribute('data-has-def', 'true');
-			    row.addEventListener('mouseenter', (e) => {
-			      if (!this.plugin.modifierHeld) return;
-			      showSidebarTooltip(row, def, this.plugin);
+			    row.addEventListener('mouseenter', (e: MouseEvent) => {
+			      const active = this.plugin.modifierHeld || isModifierActive(e, this.plugin.settings.tooltipModifierKey);
+			      if (!active) return;
+			      showTooltipOnSurface(row, def.name, def, 'sidebar');
 			    });
 			    row.addEventListener('mouseleave', () => {
-			      hideSidebarTooltip();
+			      hideAllTooltips();
 			    });
 			    // Optionally render a small group badge after the field name span
 			    if (def.group) {
@@ -853,6 +839,7 @@ class ConfirmModal extends Modal {
 	}
 
 	onClose() {
+		this.onResolve(false); // Ensure the promise resolves even if closed by Esc/click outside
 		this.contentEl.empty();
 	}
 }
@@ -1144,7 +1131,7 @@ class FieldEditModal extends Modal {
 			  const oldSlug = this.plugin.definitionStore.toSlug(this.field.name);
 			  const newSlug = this.plugin.definitionStore.toSlug(trimmed);
 			  if (oldSlug !== newSlug) {
-			    await this.plugin.definitionStore.deleteDefinitionByPath(def.filePath);
+			    await this.plugin.definitionStore.deleteDefinitionByPath(def.filePath, this.field.name);
 			  }
 			}
 
@@ -1409,70 +1396,136 @@ function buildTooltipDom(fieldName: string, def: FieldDefinition, isSidebar = fa
   return dom;
 }
 
-function positionTooltip(tooltipEl: HTMLElement, anchorEl: HTMLElement) {
+let activeTooltip: { el: HTMLElement; surface: 'sidebar' | 'props' | 'editor' } | null = null;
+
+function hideAllTooltips() {
+  if (activeTooltip) { activeTooltip.el.remove(); activeTooltip = null; }
+}
+
+function showTooltipOnSurface(
+  anchorEl: HTMLElement,
+  fieldName: string,
+  def: FieldDefinition,
+  surface: 'sidebar' | 'props' | 'editor'
+) {
+  hideAllTooltips();
+  const el = buildTooltipDom(fieldName, def, surface === 'sidebar');
+  el.style.visibility = 'hidden';
+  document.body.appendChild(el);
+  positionPropsTooltip(el, anchorEl);
+  el.style.visibility = 'visible';
+  activeTooltip = { el, surface };
+}
+
+function positionPropsTooltip(tooltipEl: HTMLElement, anchorEl: HTMLElement) {
+  // tooltipEl has already been appended with visibility:hidden
+  // so offsetHeight is now valid
   const rect = anchorEl.getBoundingClientRect();
-  const scrollY = window.scrollY;
+  const tipH  = tooltipEl.offsetHeight;
+  const tipW  = tooltipEl.offsetWidth;
+  const vph   = window.innerHeight;
+  const vpw   = window.innerWidth;
+
+  // Prefer above; fall back to below if not enough room
+  let top = rect.top - tipH - 8;
+  if (top < 8) top = rect.bottom + 8;
+
+  // Clamp left so tooltip does not overflow right edge
+  let left = rect.left;
+  if (left + tipW + 8 > vpw) left = vpw - tipW - 8;
+  if (left < 8) left = 8;
+
   tooltipEl.style.position = 'fixed';
-  tooltipEl.style.zIndex = '10000';
-  tooltipEl.style.top = `${rect.top - tooltipEl.offsetHeight - 8}px`;
-  tooltipEl.style.left = `${Math.max(8, rect.left)}px`;
+  tooltipEl.style.zIndex   = '10000';
+  tooltipEl.style.top      = `${top}px`;
+  tooltipEl.style.left     = `${left}px`;
   tooltipEl.style.maxWidth = '320px';
 }
 
-let activePropertiesTooltip: HTMLElement | null = null;
-
-function hidePropertiesTooltip() {
-	if (activePropertiesTooltip) {
-		activePropertiesTooltip.remove();
-		activePropertiesTooltip = null;
-	}
+function isModifierActive(e: MouseEvent | KeyboardEvent, key: string): boolean {
+  switch (key) {
+    case 'Alt':     return e.altKey;
+    case 'Control': return e.ctrlKey;
+    case 'Meta':    return e.metaKey;
+    case 'Shift':   return e.shiftKey;
+    default:        return false;
+  }
 }
 
-function showPropertiesTooltip(anchor: HTMLElement, def: FieldDefinition) {
-	hidePropertiesTooltip();
-	activePropertiesTooltip = buildTooltipDom(def.name, def, false);
-	document.body.appendChild(activePropertiesTooltip);
-	activePropertiesTooltip.style.visibility = 'hidden';
-	positionTooltip(activePropertiesTooltip, anchor);
-	activePropertiesTooltip.style.visibility = 'visible';
+function resolvePropertyFieldName(propEl: HTMLElement): string | null {
+  // Pattern 1 — editable mode: key is in an <input> with class metadata-property-key-input
+  // (Obsidian 1.4+)
+  const keyInput = propEl.querySelector<HTMLInputElement>(
+    '.metadata-property-key-input'
+  );
+  if (keyInput?.value?.trim()) return keyInput.value.trim();
+
+  // Pattern 2 — editable mode older variant: plain <input> inside .metadata-property-key
+  const legacyInput = propEl.querySelector<HTMLInputElement>(
+    '.metadata-property-key input'
+  );
+  if (legacyInput?.value?.trim()) return legacyInput.value.trim();
+
+  // Pattern 3 — read-only/source mode: key is text content of .metadata-property-key
+  const keySpan = propEl.querySelector<HTMLElement>('.metadata-property-key');
+  const spanText = keySpan?.textContent?.trim();
+  if (spanText) return spanText;
+
+  // Pattern 4 — data attribute fallback (some themes/plugins set data-property-key)
+  const dataKey = propEl.getAttribute('data-property-key')
+                  ?? propEl.getAttribute('data-key');
+  if (dataKey?.trim()) return dataKey.trim();
+
+  return null;
 }
 
 function registerPropertiesHover(plugin: MetadataWranglerPlugin): () => void {
-  const handleMouseEnter = (e: MouseEvent) => {
-    if (!plugin.modifierHeld) return;
+
+  // ── Core event handler ─────────────────────────────────────────────────────
+  function onMouseOver(e: MouseEvent) {
     if (!plugin.settings.enableEditorTooltips) return;
+
+    // Check modifier via BOTH the persistent flag AND the live MouseEvent
+    // This handles the Alt+focus-loss race condition on Windows/Linux
+    const modActive = plugin.modifierHeld || isModifierActive(e, plugin.settings.tooltipModifierKey);
+    if (!modActive) return;
+
     const target = e.target as HTMLElement;
+
+    // Walk up from the exact target to find .metadata-property boundary
     const propEl = target.closest('.metadata-property') as HTMLElement | null;
     if (!propEl) return;
-    const keyEl = propEl.querySelector(
-      '.metadata-property-key input, .metadata-property-key'
-    ) as HTMLInputElement | HTMLElement | null;
-    if (!keyEl) return;
-    const fieldName = (keyEl as HTMLInputElement).value?.trim()
-      ?? keyEl.textContent?.trim();
+
+    // Resolve field name from the property key using all known Obsidian class variants
+    const fieldName = resolvePropertyFieldName(propEl);
     if (!fieldName) return;
+
     const def = plugin.definitionStore.resolve(fieldName);
     if (!def || (!def.description && def.aliases.length === 0 && !def.group)) return;
-    showPropertiesTooltip(propEl, def);
-  };
 
-  const handleMouseLeave = (e: MouseEvent) => {
-    const target = e.target as HTMLElement;
-    if (target.closest('.metadata-property')) hidePropertiesTooltip();
-  };
+    showTooltipOnSurface(propEl, fieldName, def, 'props');
+  }
 
-  const handleKeyUp = (e: KeyboardEvent) => {
-    if (e.key === plugin.settings.tooltipModifierKey) hidePropertiesTooltip();
-  };
+  function onMouseOut(e: MouseEvent) {
+    // Only hide if mouse has moved OUTSIDE .metadata-property entirely
+    // relatedTarget is where the mouse moved TO — if still inside propEl, don't hide
+    const related = e.relatedTarget as HTMLElement | null;
+    if (related && related.closest('.metadata-property')) return;
+    hideAllTooltips();
+  }
 
-  document.addEventListener('mouseover', handleMouseEnter, true);
-  document.addEventListener('mouseout', handleMouseLeave, true);
-  window.addEventListener('keyup', handleKeyUp);
+  function onKeyUp(e: KeyboardEvent) {
+    if (e.key === plugin.settings.tooltipModifierKey) hideAllTooltips();
+  }
+
+  document.addEventListener('mouseover', onMouseOver, true);
+  document.addEventListener('mouseout',  onMouseOut,  true);
+  window.addEventListener('keyup', onKeyUp);
 
   return () => {
-    document.removeEventListener('mouseover', handleMouseEnter, true);
-    document.removeEventListener('mouseout', handleMouseLeave, true);
-    window.removeEventListener('keyup', handleKeyUp);
+    document.removeEventListener('mouseover', onMouseOver, true);
+    document.removeEventListener('mouseout',  onMouseOut,  true);
+    window.removeEventListener('keyup', onKeyUp);
   };
 }
 

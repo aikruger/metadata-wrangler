@@ -633,3 +633,9 @@
 .pw-btn-danger-outline:hover {
   background: var(--background-modifier-error-hover);
 }
+
+/* Ensure properties panel rows do not clip the tooltip anchor hit area */
+.metadata-container .metadata-property {
+  overflow: visible !important;
+  position: relative;
+}
