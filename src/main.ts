@@ -1,5 +1,8 @@
 import {
 	App,
+	Editor,
+	FuzzySuggestModal,
+	FuzzyMatch,
 	ItemView,
 	Modal,
 	Notice,
@@ -8,7 +11,8 @@ import {
 	WorkspaceLeaf,
 	debounce,
 } from 'obsidian';
-import { MetadataWranglerSettingTab } from './settings';
+import { MetadataWranglerSettingTab, MetadataWranglerSettings, DEFAULT_SETTINGS } from './settings';
+import { hoverTooltip } from '@codemirror/view';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,6 +29,24 @@ interface FieldInfo {
 	files: Set<string>;
 	values: Map<string, ValueInfo>;
 	fieldType: FieldType;
+}
+
+/** User-authored definition attached to a field from the registry folder. */
+interface FieldDefinition {
+  /** Canonical field name — must match the indexed FieldInfo.name exactly. */
+  name: string;
+  /** Human-readable description. Shown in hover tooltips and Dataview. */
+  description: string;
+  /** Alternative names that also resolve to this field (comma-separated in YAML). */
+  aliases: string[];
+  /** Top-level classification group, e.g. "Project", "Person", "Status". */
+  group: string;
+  /** Optional sub-classification, e.g. "Administrative", "Creative". */
+  subgroup: string;
+  /** FieldSource scope: "frontmatter", "inline", or "both". */
+  sourceScope: 'frontmatter' | 'inline' | 'both';
+  /** Vault path to the definition note, e.g. "metadata/status.md". */
+  filePath: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -76,7 +98,7 @@ function detectTypeFromString(s: string): FieldType {
 
 // ─── Indexing ─────────────────────────────────────────────────────────────────
 
-async function buildIndex(app: App): Promise<Map<string, FieldInfo>> {
+async function buildIndex(app: App, plugin: MetadataWranglerPlugin): Promise<Map<string, FieldInfo>> {
 	const index = new Map<string, FieldInfo>();
 
 	const upsert = (key: string, name: string, source: FieldSource): FieldInfo => {
@@ -108,6 +130,9 @@ async function buildIndex(app: App): Promise<Map<string, FieldInfo>> {
 	};
 
 	for (const file of app.vault.getMarkdownFiles()) {
+		// Skip definition notes to avoid polluting occurrence statistics.
+		if (file.path.startsWith(plugin.settings.definitionFolder + '/')) continue;
+
 		// ── Frontmatter via metadata cache ──
 		const cache = app.metadataCache.getFileCache(file);
 		if (cache?.frontmatter) {
@@ -278,6 +303,28 @@ async function updateInlineValue(
 	}
 }
 
+async function deleteEntireFrontmatterKey(app: App, filePath: string, key: string) {
+  const file = app.vault.getAbstractFileByPath(filePath);
+  if (!(file instanceof TFile)) return;
+  await app.fileManager.processFrontMatter(file, fm => {
+    delete fm[key];
+  });
+}
+
+async function deleteAllInlineOccurrences(app: App, filePaths: string[], key: string) {
+  const pattern = new RegExp(`^${escapeRegex(key)}::[ \\t]*.*$\\n?`, 'gm');
+  for (const path of filePaths) {
+    const file = app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) continue;
+    const content = await app.vault.read(file);
+    const fmEnd = getFrontmatterEnd(content);
+    const body = content.slice(fmEnd).replace(pattern, '');
+    if (body !== content.slice(fmEnd)) {
+      await app.vault.modify(file, content.slice(0, fmEnd) + body);
+    }
+  }
+}
+
 async function deleteInlineValue(
 	app: App,
 	files: string[],
@@ -399,16 +446,174 @@ async function inlineToFrontmatter(
 	}
 }
 
+// ─── Definition Store ──────────────────────────────────────────────────────────
+
+class DefinitionStore {
+  private app: App;
+  private folderPath: string;
+  /** In-memory cache, keyed by canonical lowercase field name. */
+  private cache: Map<string, FieldDefinition> = new Map();
+
+  constructor(app: App, folderPath: string) {
+    this.app = app;
+    this.folderPath = folderPath;
+  }
+
+  updateFolder(folderPath: string): void {
+    this.folderPath = folderPath;
+    this.cache.clear();
+  }
+
+  // ── Persistence ──
+
+  /** Ensure the definition folder exists. */
+  async ensureFolder(): Promise<void> {
+    const exists = this.app.vault.getAbstractFileByPath(this.folderPath);
+    if (!exists) {
+      await this.app.vault.createFolder(this.folderPath);
+    }
+  }
+
+  /** Load all .md files in the definition folder into the cache. */
+  async loadAll(): Promise<void> {
+    this.cache.clear();
+    await this.ensureFolder();
+    const folder = this.app.vault.getAbstractFileByPath(this.folderPath);
+    if (!folder) return;
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      if (!file.path.startsWith(this.folderPath + '/')) continue;
+      const def = await this.readDefinitionFile(file);
+      if (def) {
+        this.cache.set(def.name.toLowerCase(), def);
+      }
+    }
+  }
+
+  private async readDefinitionFile(file: TFile): Promise<FieldDefinition | null> {
+    try {
+      const cache = this.app.metadataCache.getFileCache(file);
+      const fm = cache?.frontmatter;
+      if (!fm || typeof fm['name'] !== 'string') return null;
+      return {
+        name: fm['name'] as string,
+        description: (fm['description'] as string) ?? '',
+        aliases: Array.isArray(fm['aliases'])
+          ? (fm['aliases'] as string[]).map(String)
+          : typeof fm['aliases'] === 'string'
+          ? [fm['aliases'] as string]
+          : [],
+        group: (fm['group'] as string) ?? '',
+        subgroup: (fm['subgroup'] as string) ?? '',
+        sourceScope: (['frontmatter', 'inline', 'both'].includes(fm['sourceScope'] as string)
+          ? fm['sourceScope']
+          : 'both') as FieldDefinition['sourceScope'],
+        filePath: file.path,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Lookups ──
+
+  /** Resolve by exact canonical name (case-insensitive). */
+  getByName(name: string): FieldDefinition | undefined {
+    return this.cache.get(name.toLowerCase());
+  }
+
+  /** Resolve by alias (case-insensitive). Returns first match. */
+  getByAlias(alias: string): FieldDefinition | undefined {
+    const lower = alias.toLowerCase();
+    for (const def of this.cache.values()) {
+      if (def.aliases.some((a) => a.toLowerCase() === lower)) return def;
+    }
+    return undefined;
+  }
+
+  /** Resolve by canonical name first, then alias. */
+  resolve(nameOrAlias: string): FieldDefinition | undefined {
+    return this.getByName(nameOrAlias) ?? this.getByAlias(nameOrAlias);
+  }
+
+  /** Return all definitions as an array. */
+  getAll(): FieldDefinition[] {
+    return [...this.cache.values()];
+  }
+
+  // ── Writes ──
+
+  /** Save (create or overwrite) a definition. Updates cache. */
+  async save(def: FieldDefinition): Promise<void> {
+    await this.ensureFolder();
+    const slug = this.toSlug(def.name);
+    const filePath = `${this.folderPath}/${slug}.md`;
+    const aliasesYaml =
+      def.aliases.length > 0
+        ? `aliases:\n${def.aliases.map((a) => `  - "${a}"`).join('\n')}`
+        : 'aliases: []';
+    const content =
+      `---\nname: "${def.name}"\n${aliasesYaml}\ndescription: "${def.description.replace(/"/g, '\\"')}"\ngroup: "${def.group}"\nsubgroup: "${def.subgroup}"\nsourceScope: ${def.sourceScope}\n---\n\n# ${def.name}\n\n${def.description}\n`;
+
+    const existing = this.app.vault.getAbstractFileByPath(filePath);
+    if (existing instanceof TFile) {
+      await this.app.vault.modify(existing, content);
+    } else {
+      await this.app.vault.create(filePath, content);
+    }
+    this.cache.set(def.name.toLowerCase(), { ...def, filePath });
+  }
+
+  /** Open the definition note in a new leaf. */
+  async open(def: FieldDefinition): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(def.filePath);
+    if (file instanceof TFile) {
+      await this.app.workspace.getLeaf(true).openFile(file);
+    }
+  }
+
+  async deleteDefinition(fieldName: string): Promise<boolean> {
+    const key = fieldName.toLowerCase();
+    const def = this.cache.get(key);
+    if (!def) return false;
+    const file = this.app.vault.getAbstractFileByPath(def.filePath);
+    if (file instanceof TFile) {
+      await this.app.vault.trash(file, true);
+    }
+    this.cache.delete(key);
+    return true;
+  }
+
+  async deleteDefinitionByPath(filePath: string, oldKey?: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (file instanceof TFile) {
+      await this.app.vault.trash(file, true);
+    }
+    if (oldKey) {
+      this.cache.delete(oldKey.toLowerCase());
+    }
+  }
+
+  toSlug(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .slice(0, 64);
+  }
+}
+
 // ─── View ─────────────────────────────────────────────────────────────────────
 
 class MetadataWranglerView extends ItemView {
 	private plugin: MetadataWranglerPlugin;
-	private index: Map<string, FieldInfo> = new Map();
+	index: Map<string, FieldInfo> = new Map();
 	private loading = false;
 	private searchQuery = '';
 	private showFrontmatter = true;
 	private showInline = true;
 	private listContainer: HTMLElement | null = null;
+	private _keyUpHandler: (e: KeyboardEvent) => void;
 
 	constructor(leaf: WorkspaceLeaf, plugin: MetadataWranglerPlugin) {
 		super(leaf);
@@ -421,16 +626,22 @@ class MetadataWranglerView extends ItemView {
 	getIcon(): string { return 'list-plus'; }
 
 	async onOpen(): Promise<void> {
+		this._keyUpHandler = (e: KeyboardEvent) => {
+			if (e.key === this.plugin.settings.tooltipModifierKey) hideAllTooltips();
+		};
+		window.addEventListener('keyup', this._keyUpHandler);
 		await this.refresh();
 	}
 
-	async onClose(): Promise<void> { /* nothing to clean up */ }
+	async onClose(): Promise<void> {
+		window.removeEventListener('keyup', this._keyUpHandler);
+	}
 
 	async refresh(): Promise<void> {
 		this.loading = true;
 		this.render();
 		try {
-			this.index = await buildIndex(this.app);
+			this.index = await buildIndex(this.app, this.plugin);
 		} catch (e) {
 			console.error('metadata-wrangler: indexing failed', e);
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
@@ -515,17 +726,34 @@ class MetadataWranglerView extends ItemView {
 	}
 
 	private getFilteredFields(): FieldInfo[] {
-		const fields: FieldInfo[] = [];
-		for (const field of this.index.values()) {
-			if (field.source === 'frontmatter' && !this.showFrontmatter) continue;
-			if (field.source === 'inline' && !this.showInline) continue;
-			if (
-				this.searchQuery &&
-				!field.name.toLowerCase().includes(this.searchQuery.toLowerCase())
-			) continue;
-			fields.push(field);
-		}
-		return fields.sort((a, b) => a.name.localeCompare(b.name));
+	  const q = this.searchQuery.toLowerCase();
+	  const fields: FieldInfo[] = [];
+	  for (const field of this.index.values()) {
+	    if (field.source === 'frontmatter' && !this.showFrontmatter) continue;
+	    if (field.source === 'inline' && !this.showInline) continue;
+	    if (q) {
+	      const nameMatch = field.name.toLowerCase().includes(q);
+	      let aliasMatch = false;
+	      let descMatch = false;
+	      if (this.plugin.settings.searchAliasesAndDescriptions) {
+	        const def = this.plugin.definitionStore.resolve(field.name);
+	        if (def) {
+	          aliasMatch = def.aliases.some((a) => a.toLowerCase().includes(q));
+	          descMatch = def.description.toLowerCase().includes(q);
+	          // Also match group/subgroup
+	          const groupMatch =
+	            def.group.toLowerCase().includes(q) || def.subgroup.toLowerCase().includes(q);
+	          if (!nameMatch && !aliasMatch && !descMatch && !groupMatch) continue;
+	        } else if (!nameMatch) {
+	          continue;
+	        }
+	      } else if (!nameMatch) {
+	        continue;
+	      }
+	    }
+	    fields.push(field);
+	  }
+	  return fields.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	private renderList(container: HTMLElement, fields: FieldInfo[]): void {
@@ -554,20 +782,85 @@ class MetadataWranglerView extends ItemView {
 				text: `${field.files.size} file${field.files.size !== 1 ? 's' : ''}, ${field.values.size} value${field.values.size !== 1 ? 's' : ''}`,
 			});
 			row.addEventListener('click', () => {
-				new FieldEditModal(this.app, field, () => { void this.refresh(); }).open();
+				new FieldEditModal(this.app, this.plugin, field, () => { void this.refresh(); }).open();
 			});
+
+			// Sidebar tooltip from definition
+			if (this.plugin.settings.enableSidebarTooltips) {
+			  const def = this.plugin.definitionStore.resolve(field.name);
+			  if (def) {
+			    row.setAttribute('data-has-def', 'true');
+			    row.addEventListener('mouseenter', (e: MouseEvent) => {
+			      const active = this.plugin.modifierHeld || isModifierActive(e, this.plugin.settings.tooltipModifierKey);
+			      if (!active) return;
+			      showTooltipOnSurface(row, def.name, def, 'sidebar');
+			    });
+			    row.addEventListener('mouseleave', () => {
+			      hideAllTooltips();
+			    });
+			    // Optionally render a small group badge after the field name span
+			    if (def.group) {
+			      row.createEl('span', {
+			        cls: 'pw-group-badge',
+			        text: def.subgroup ? `${def.group} › ${def.subgroup}` : def.group,
+			        title: `Group: ${def.group}${def.subgroup ? ' / ' + def.subgroup : ''}`,
+			      });
+			    }
+			  }
+			}
 		}
 	}
+}
+
+// ─── Confirm Modal ────────────────────────────────────────────────────────────
+
+class ConfirmModal extends Modal {
+	constructor(app: App, private title: string, private body: string, private onResolve: (confirmed: boolean) => void) {
+		super(app);
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h2', { text: this.title });
+		contentEl.createEl('p', { text: this.body });
+
+		const row = contentEl.createDiv({ cls: 'pw-rename-row' });
+		const confirmBtn = row.createEl('button', { cls: 'pw-btn pw-btn-danger', text: 'Confirm' });
+		const cancelBtn = row.createEl('button', { cls: 'pw-btn', text: 'Cancel' });
+
+		confirmBtn.addEventListener('click', () => {
+			this.onResolve(true);
+			this.close();
+		});
+		cancelBtn.addEventListener('click', () => {
+			this.onResolve(false);
+			this.close();
+		});
+	}
+
+	onClose() {
+		this.onResolve(false); // Ensure the promise resolves even if closed by Esc/click outside
+		this.contentEl.empty();
+	}
+}
+
+function confirmDialog(app: App, title: string, body: string): Promise<boolean> {
+	return new Promise(resolve => {
+		const m = new ConfirmModal(app, title, body, resolve);
+		m.open();
+	});
 }
 
 // ─── Field Edit Modal ─────────────────────────────────────────────────────────
 
 class FieldEditModal extends Modal {
+	private plugin: MetadataWranglerPlugin;
 	private field: FieldInfo;
 	private onRefresh: () => void;
 
-	constructor(app: App, field: FieldInfo, onRefresh: () => void) {
+	constructor(app: App, plugin: MetadataWranglerPlugin, field: FieldInfo, onRefresh: () => void) {
 		super(app);
+		this.plugin = plugin;
 		this.field = field;
 		this.onRefresh = onRefresh;
 	}
@@ -603,6 +896,72 @@ class FieldEditModal extends Modal {
 			void this.handleRename(nameInput.value);
 		});
 
+		// ── Definition section ──
+		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Definition' });
+		const defSection = contentEl.createDiv({ cls: 'pw-definition-section' });
+
+		const existingDef = this.plugin.definitionStore.resolve(this.field.name);
+
+		// Description
+		defSection.createEl('label', { cls: 'pw-label', text: 'Description:' });
+		const descTextarea = defSection.createEl('textarea', { cls: 'pw-def-textarea' });
+		descTextarea.value = existingDef?.description ?? '';
+		descTextarea.rows = 3;
+		descTextarea.placeholder = 'Human-readable description of this field…';
+
+		// Aliases
+		defSection.createEl('label', { cls: 'pw-label', text: 'Aliases (comma-separated):' });
+		const aliasInput = defSection.createEl('input', { cls: 'pw-name-input', type: 'text' });
+		aliasInput.value = existingDef?.aliases.join(', ') ?? '';
+		aliasInput.placeholder = 'e.g. state, lifecycle status';
+
+		// Group
+		defSection.createEl('label', { cls: 'pw-label', text: 'Group:' });
+		const groupInput = defSection.createEl('input', { cls: 'pw-name-input', type: 'text' });
+		groupInput.value = existingDef?.group ?? '';
+		groupInput.placeholder = 'e.g. Project, Person, Status';
+
+		// Subgroup
+		defSection.createEl('label', { cls: 'pw-label', text: 'Subgroup (optional):' });
+		const subgroupInput = defSection.createEl('input', { cls: 'pw-name-input', type: 'text' });
+		subgroupInput.value = existingDef?.subgroup ?? '';
+		subgroupInput.placeholder = 'e.g. Administrative, Creative';
+
+		// Save + Open definition buttons
+		const defActionRow = defSection.createDiv({ cls: 'pw-rename-row' });
+		const saveDefBtn = defActionRow.createEl('button', {
+		  cls: 'pw-btn pw-btn-primary',
+		  text: existingDef ? 'Save definition' : 'Create definition',
+		});
+		if (existingDef) {
+		  const openDefBtn = defActionRow.createEl('button', {
+		    cls: 'pw-btn pw-btn-secondary',
+		    text: 'Open definition note',
+		  });
+		  openDefBtn.addEventListener('click', () => {
+		    void this.plugin.definitionStore.open(existingDef);
+		  });
+		}
+
+		saveDefBtn.addEventListener('click', () => {
+		  void this.handleSaveDefinition({
+		    name: this.field.name,
+		    description: descTextarea.value.trim(),
+		    aliases: aliasInput.value
+		      .split(',')
+		      .map((a) => a.trim())
+		      .filter(Boolean),
+		    group: groupInput.value.trim(),
+		    subgroup: subgroupInput.value.trim(),
+		    sourceScope: this.field.source === 'frontmatter'
+		      ? 'frontmatter'
+		      : this.field.source === 'inline'
+		      ? 'inline'
+		      : 'both',
+		    filePath: existingDef?.filePath ?? '',
+		  }, saveDefBtn);
+		});
+
 		// Values section
 		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Values' });
 		const valuesContainer = contentEl.createDiv({ cls: 'pw-values-container' });
@@ -611,6 +970,66 @@ class FieldEditModal extends Modal {
 		// Convert / Copy section
 		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Convert / copy' });
 		this.renderConvertSection(contentEl);
+
+		// Danger zone
+		contentEl.createEl('h3', { cls: 'pw-section-title pw-danger-title', text: 'Danger zone' });
+		const dangerSection = contentEl.createDiv({ cls: 'pw-danger-section' });
+
+		const deleteFieldBtn = dangerSection.createEl('button', {
+		  cls: 'pw-btn pw-btn-danger',
+		  text: 'Delete field from all notes'
+		});
+
+		deleteFieldBtn.addEventListener('click', () => {
+			void this.handleDeleteField();
+		});
+
+		if (existingDef) {
+			const deleteDefBtn = dangerSection.createEl('button', {
+			  cls: 'pw-btn pw-btn-danger-outline',
+			  text: 'Delete definition only'
+			});
+			deleteDefBtn.addEventListener('click', () => {
+				void this.handleDeleteDefinitionOnly();
+			});
+		}
+	}
+
+	private async handleDeleteField() {
+	  const confirmed = await confirmDialog(
+		this.app,
+	    `Delete field "${this.field.name}" from all ${this.field.files.size} file(s)?`,
+	    'This will remove all values for this field from frontmatter and inline. This cannot be undone.'
+	  );
+	  if (!confirmed) return;
+	  const files = [...this.field.files];
+	  if (this.field.source === 'frontmatter') {
+	    for (const path of files) {
+	      await deleteEntireFrontmatterKey(this.app, path, this.field.name);
+	    }
+	  } else {
+	    await deleteAllInlineOccurrences(this.app, files, this.field.name);
+	  }
+	  const hadDef = await this.plugin.definitionStore.deleteDefinition(this.field.name);
+	  const defNote = hadDef ? ' Definition note also deleted.' : '';
+	  new Notice(`Deleted field "${this.field.name}" from ${files.length} file(s).${defNote}`);
+	  this.close();
+	  this.onRefresh();
+	}
+
+	private async handleDeleteDefinitionOnly() {
+	  const def = this.plugin.definitionStore.resolve(this.field.name);
+	  if (!def) { new Notice('No definition exists for this field.'); return; }
+	  const confirmed = await confirmDialog(
+		this.app,
+	    `Delete definition for "${this.field.name}"?`,
+	    `This removes the definition note at "${def.filePath}" but leaves field occurrences in notes untouched.`
+	  );
+	  if (!confirmed) return;
+	  await this.plugin.definitionStore.deleteDefinition(this.field.name);
+	  new Notice(`Definition for "${this.field.name}" deleted.`);
+	  this.close();
+	  this.onRefresh();
 	}
 
 	private renderConvertSection(container: HTMLElement): void {
@@ -660,6 +1079,22 @@ class FieldEditModal extends Modal {
 		}
 	}
 
+	private async handleSaveDefinition(def: FieldDefinition, btn: HTMLButtonElement): Promise<void> {
+	  btn.disabled = true;
+	  btn.textContent = 'Saving…';
+	  try {
+	    await this.plugin.definitionStore.save(def);
+	    new Notice(`Definition for "${def.name}" saved.`);
+	    btn.textContent = 'Saved ✓';
+	    btn.disabled = false;
+	  } catch (e) {
+	    new Notice(`Failed to save definition for "${def.name}".`);
+	    console.error('metadata-wrangler: save definition failed', e);
+	    btn.textContent = 'Save definition';
+	    btn.disabled = false;
+	  }
+	}
+
 	private async handleConvert(
 		direction: 'frontmatter-to-inline' | 'inline-to-frontmatter',
 		getMode: () => 'convert' | 'copy',
@@ -687,6 +1122,19 @@ class FieldEditModal extends Modal {
 		} else {
 			await renameInlineKey(this.app, files, this.field.name, trimmed);
 		}
+
+			const def = this.plugin.definitionStore.resolve(this.field.name);
+			if (def) {
+			  const renamedDef = { ...def, name: trimmed };
+			  await this.plugin.definitionStore.save(renamedDef);
+			  // Only delete old def file if slug changed
+			  const oldSlug = this.plugin.definitionStore.toSlug(this.field.name);
+			  const newSlug = this.plugin.definitionStore.toSlug(trimmed);
+			  if (oldSlug !== newSlug) {
+			    await this.plugin.definitionStore.deleteDefinitionByPath(def.filePath, this.field.name);
+			  }
+			}
+
 		new Notice(`Renamed "${this.field.name}" → "${trimmed}"`);
 		this.close();
 		this.onRefresh();
@@ -826,41 +1274,392 @@ class FieldEditModal extends Modal {
 	}
 }
 
+// ─── Inline Field Suggester ───────────────────────────────────────────────────
+
+interface SuggestItem {
+  field: FieldInfo;
+  def: FieldDefinition | undefined;
+  /** The text matched (canonical name or alias that triggered the match). */
+  matchedText: string;
+}
+
+class InlineFieldSuggester extends FuzzySuggestModal<SuggestItem> {
+  private plugin: MetadataWranglerPlugin;
+  private editor: Editor;
+  private items: SuggestItem[] = [];
+
+  constructor(app: App, plugin: MetadataWranglerPlugin, editor: Editor) {
+    super(app);
+    this.plugin = plugin;
+    this.editor = editor;
+    this.setPlaceholder('Search inline fields…');
+    this.setInstructions([
+      { command: '↑↓', purpose: 'navigate' },
+      { command: '↵', purpose: 'insert field' },
+      { command: 'esc', purpose: 'cancel' },
+    ]);
+  }
+
+  onOpen(): void {
+    // Build items from the plugin's current view index via a fresh index call.
+    // We resolve inline fields only from the existing sidebar view index if available,
+    // falling back to an async build. Use the simpler synchronous path: read the view.
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    const view = leaves[0]?.view as MetadataWranglerView | undefined;
+    const index: Map<string, FieldInfo> = view
+      ? (view as unknown as { index: Map<string, FieldInfo> }).index
+      : new Map();
+
+    this.items = [];
+    for (const field of index.values()) {
+      if (field.source !== 'inline') continue;
+      const def = this.plugin.definitionStore.resolve(field.name);
+      this.items.push({ field, def, matchedText: field.name });
+      // Also add alias-keyed entries for search surfacing
+      if (def) {
+        for (const alias of def.aliases) {
+          this.items.push({ field, def, matchedText: alias });
+        }
+      }
+    }
+
+    super.onOpen();
+  }
+
+  getItems(): SuggestItem[] {
+    return this.items;
+  }
+
+  getItemText(item: SuggestItem): string {
+    // FuzzySuggestModal matches against this string.
+    // Include name, aliases (via matchedText), group, description for broad matching.
+    const parts = [item.field.name, item.matchedText];
+    if (item.def?.group) parts.push(item.def.group);
+    if (item.def?.subgroup) parts.push(item.def.subgroup);
+    if (item.def?.description) parts.push(item.def.description);
+    return parts.join(' ');
+  }
+
+  renderSuggestion(item: FuzzyMatch<SuggestItem>, el: HTMLElement): void {
+    const { item: si } = item;
+    el.addClass('pw-suggester-item');
+    const nameRow = el.createDiv({ cls: 'pw-suggester-name-row' });
+    nameRow.createEl('span', { cls: 'pw-field-name', text: si.field.name });
+    if (si.def?.group) {
+      nameRow.createEl('span', {
+        cls: 'pw-group-badge',
+        text: si.def.subgroup
+          ? `${si.def.group} › ${si.def.subgroup}`
+          : si.def.group,
+      });
+    }
+    if (si.matchedText !== si.field.name) {
+      // Matched via alias — show it
+      el.createEl('small', {
+        cls: 'pw-suggester-alias',
+        text: `alias: ${si.matchedText}`,
+      });
+    }
+    if (si.def?.description) {
+      el.createEl('small', {
+        cls: 'pw-suggester-desc',
+        text: si.def.description,
+      });
+    }
+  }
+
+  onChooseItem(item: SuggestItem): void {
+    const suffix = this.plugin.settings.insertionTrailingSpace ? ':: ' : '::';
+    const insertion = `${item.field.name}${suffix}`;
+    this.editor.replaceSelection(insertion);
+  }
+}
+
+// ─── Tooltip UI Helpers ───────────────────────────────────────────────────────
+
+function buildTooltipDom(fieldName: string, def: FieldDefinition, isSidebar = false): HTMLElement {
+  const dom = document.createElement('div');
+  dom.addClass(isSidebar ? 'pw-sidebar-tooltip' : 'pw-editor-tooltip');
+  dom.createEl('strong', { text: fieldName });
+  if (def.group) {
+    dom.createEl('span', {
+      cls: 'pw-tooltip-group',
+      text: ` [${def.group}${def.subgroup ? ' › ' + def.subgroup : ''}]`,
+    });
+  }
+  if (def.description) {
+    dom.createEl('p', { cls: 'pw-tooltip-desc', text: def.description });
+  }
+  if (def.aliases.length > 0) {
+    dom.createEl('small', { text: `Aliases: ${def.aliases.join(', ')}` });
+  }
+  return dom;
+}
+
+let activeTooltip: { el: HTMLElement; surface: 'sidebar' | 'props' | 'editor' } | null = null;
+
+function hideAllTooltips() {
+  if (activeTooltip) { activeTooltip.el.remove(); activeTooltip = null; }
+}
+
+function showTooltipOnSurface(
+  anchorEl: HTMLElement,
+  fieldName: string,
+  def: FieldDefinition,
+  surface: 'sidebar' | 'props' | 'editor'
+) {
+  hideAllTooltips();
+  const el = buildTooltipDom(fieldName, def, surface === 'sidebar');
+  el.style.visibility = 'hidden';
+  document.body.appendChild(el);
+  positionPropsTooltip(el, anchorEl);
+  el.style.visibility = 'visible';
+  activeTooltip = { el, surface };
+}
+
+function positionPropsTooltip(tooltipEl: HTMLElement, anchorEl: HTMLElement) {
+  // tooltipEl has already been appended with visibility:hidden
+  // so offsetHeight is now valid
+  const rect = anchorEl.getBoundingClientRect();
+  const tipH  = tooltipEl.offsetHeight;
+  const tipW  = tooltipEl.offsetWidth;
+  const vph   = window.innerHeight;
+  const vpw   = window.innerWidth;
+
+  // Prefer above; fall back to below if not enough room
+  let top = rect.top - tipH - 8;
+  if (top < 8) top = rect.bottom + 8;
+
+  // Clamp left so tooltip does not overflow right edge
+  let left = rect.left;
+  if (left + tipW + 8 > vpw) left = vpw - tipW - 8;
+  if (left < 8) left = 8;
+
+  tooltipEl.style.position = 'fixed';
+  tooltipEl.style.zIndex   = '10000';
+  tooltipEl.style.top      = `${top}px`;
+  tooltipEl.style.left     = `${left}px`;
+  tooltipEl.style.maxWidth = '320px';
+}
+
+function isModifierActive(e: MouseEvent | KeyboardEvent, key: string): boolean {
+  switch (key) {
+    case 'Alt':     return e.altKey;
+    case 'Control': return e.ctrlKey;
+    case 'Meta':    return e.metaKey;
+    case 'Shift':   return e.shiftKey;
+    default:        return false;
+  }
+}
+
+function resolvePropertyFieldName(propEl: HTMLElement): string | null {
+  // Pattern 1 — editable mode: key is in an <input> with class metadata-property-key-input
+  // (Obsidian 1.4+)
+  const keyInput = propEl.querySelector<HTMLInputElement>(
+    '.metadata-property-key-input'
+  );
+  if (keyInput?.value?.trim()) return keyInput.value.trim();
+
+  // Pattern 2 — editable mode older variant: plain <input> inside .metadata-property-key
+  const legacyInput = propEl.querySelector<HTMLInputElement>(
+    '.metadata-property-key input'
+  );
+  if (legacyInput?.value?.trim()) return legacyInput.value.trim();
+
+  // Pattern 3 — read-only/source mode: key is text content of .metadata-property-key
+  const keySpan = propEl.querySelector<HTMLElement>('.metadata-property-key');
+  const spanText = keySpan?.textContent?.trim();
+  if (spanText) return spanText;
+
+  // Pattern 4 — data attribute fallback (some themes/plugins set data-property-key)
+  const dataKey = propEl.getAttribute('data-property-key')
+                  ?? propEl.getAttribute('data-key');
+  if (dataKey?.trim()) return dataKey.trim();
+
+  return null;
+}
+
+function registerPropertiesHover(plugin: MetadataWranglerPlugin): () => void {
+
+  // ── Core event handler ─────────────────────────────────────────────────────
+  function onMouseOver(e: MouseEvent) {
+    if (!plugin.settings.enableEditorTooltips) return;
+
+    // Check modifier via BOTH the persistent flag AND the live MouseEvent
+    // This handles the Alt+focus-loss race condition on Windows/Linux
+    const modActive = plugin.modifierHeld || isModifierActive(e, plugin.settings.tooltipModifierKey);
+    if (!modActive) return;
+
+    const target = e.target as HTMLElement;
+
+    // Walk up from the exact target to find .metadata-property boundary
+    const propEl = target.closest('.metadata-property') as HTMLElement | null;
+    if (!propEl) return;
+
+    // Resolve field name from the property key using all known Obsidian class variants
+    const fieldName = resolvePropertyFieldName(propEl);
+    if (!fieldName) return;
+
+    const def = plugin.definitionStore.resolve(fieldName);
+    if (!def || (!def.description && def.aliases.length === 0 && !def.group)) return;
+
+    showTooltipOnSurface(propEl, fieldName, def, 'props');
+  }
+
+  function onMouseOut(e: MouseEvent) {
+    // Only hide if mouse has moved OUTSIDE .metadata-property entirely
+    // relatedTarget is where the mouse moved TO — if still inside propEl, don't hide
+    const related = e.relatedTarget as HTMLElement | null;
+    if (related && related.closest('.metadata-property')) return;
+    hideAllTooltips();
+  }
+
+  function onKeyUp(e: KeyboardEvent) {
+    if (e.key === plugin.settings.tooltipModifierKey) hideAllTooltips();
+  }
+
+  document.addEventListener('mouseover', onMouseOver, true);
+  document.addEventListener('mouseout',  onMouseOut,  true);
+  window.addEventListener('keyup', onKeyUp);
+
+  return () => {
+    document.removeEventListener('mouseover', onMouseOver, true);
+    document.removeEventListener('mouseout',  onMouseOut,  true);
+    window.removeEventListener('keyup', onKeyUp);
+  };
+}
+
+// ─── Editor Hover Tooltips ────────────────────────────────────────────────────
+// Uses the CodeMirror 6 hoverTooltip extension to show field definitions
+// when hovering over "key:: value" patterns in the editor body.
+
+function buildEditorTooltipExtension(plugin: MetadataWranglerPlugin) {
+  return hoverTooltip((view, pos) => {
+    if (!plugin.modifierHeld) return null;
+    if (!plugin.settings.enableEditorTooltips) return null;
+    const line = view.state.doc.lineAt(pos);
+    const lineText = line.text;
+    const m = INLINE_FIELD_RE.exec(lineText);
+    if (!m) return null;
+
+    const fieldName = m[1]?.trim();
+    if (!fieldName) return null;
+
+    // Only show tooltip if the cursor/hover position is within the key part.
+    const keyEnd = line.from + (m.index ?? 0) + m[1]!.length;
+    if (pos > keyEnd + 2) return null; // past the "::"
+
+    const def = plugin.definitionStore.resolve(fieldName);
+    if (!def || (!def.description && def.aliases.length === 0 && !def.group)) return null;
+
+    return {
+      pos: line.from + (m.index ?? 0),
+      end: keyEnd,
+      above: true,
+      create() {
+        return { dom: buildTooltipDom(fieldName, def) };
+      },
+    };
+  });
+}
+
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
 export default class MetadataWranglerPlugin extends Plugin {
-	async onload(): Promise<void> {
-		this.registerView(
-			VIEW_TYPE,
-			(leaf) => new MetadataWranglerView(leaf, this),
-		);
+  settings!: MetadataWranglerSettings;
+  definitionStore!: DefinitionStore;
+  modifierHeld = false;
+  private _onKeyDown: (e: KeyboardEvent) => void;
+  private _onKeyUp: (e: KeyboardEvent) => void;
+  private _unregisterPropertiesHover?: () => void;
+  private _editorExtension: any[] = [];
 
-		// eslint-disable-next-line obsidianmd/ui/sentence-case
-		this.addRibbonIcon('list-plus', 'metadata wrangler', () => {
-			void this.openView();
-		});
+  /** Public API for DataviewJS and other plugins. */
+  api = {
+    getFieldDefinition: (name: string) => this.definitionStore.resolve(name),
+    getAllFieldDefinitions: () => this.definitionStore.getAll(),
+  };
 
-		this.addCommand({
-			id: 'open-view',
-			name: 'Open view',
-			callback: () => { void this.openView(); },
-		});
+  async onload(): Promise<void> {
+    await this.loadSettings();
+    this.definitionStore = new DefinitionStore(this.app, this.settings.definitionFolder);
 
-		this.addSettingTab(new MetadataWranglerSettingTab(this.app, this));
-	}
+    // Load definitions after layout is ready (vault is fully available).
+    this.app.workspace.onLayoutReady(() => {
+      void this.definitionStore.loadAll();
+      this._unregisterPropertiesHover = registerPropertiesHover(this);
+    });
 
-	onunload(): void { /* nothing to clean up */ }
+    this.registerView(VIEW_TYPE, (leaf) => new MetadataWranglerView(leaf, this));
 
-	private async openView(): Promise<void> {
-		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
-		if (existing.length > 0) {
-			void this.app.workspace.revealLeaf(existing[0]!);
-			return;
-		}
-		const leaf = this.app.workspace.getRightLeaf(false);
-		if (leaf) {
-			await leaf.setViewState({ type: VIEW_TYPE, active: true });
-			void this.app.workspace.revealLeaf(leaf);
-		}
-	}
+    this._onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === this.settings.tooltipModifierKey) this.modifierHeld = true;
+    };
+    this._onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === this.settings.tooltipModifierKey) this.modifierHeld = false;
+    };
+    window.addEventListener('keydown', this._onKeyDown);
+    window.addEventListener('keyup', this._onKeyUp);
+
+    this.addRibbonIcon('list-plus', 'metadata wrangler', () => {
+      void this.openView();
+    });
+
+    this.addCommand({
+      id: 'open-view',
+      name: 'Open view',
+      callback: () => { void this.openView(); },
+    });
+
+    this.addCommand({
+      id: 'insert-inline-field',
+      name: 'Insert inline field at cursor',
+      editorCallback: (editor) => {
+        new InlineFieldSuggester(this.app, this, editor).open();
+      },
+    });
+
+    this.addSettingTab(new MetadataWranglerSettingTab(this.app, this));
+
+    if (this.settings.enableEditorTooltips) {
+      this._editorExtension = [buildEditorTooltipExtension(this)];
+      this.registerEditorExtension(this._editorExtension);
+    }
+  }
+
+  rebuildEditorExtension(): void {
+    if (this.settings.enableEditorTooltips) {
+      this._editorExtension.length = 0;
+      this._editorExtension.push(buildEditorTooltipExtension(this));
+      this.app.workspace.updateOptions();
+    }
+  }
+
+  onunload(): void {
+    window.removeEventListener('keydown', this._onKeyDown);
+    window.removeEventListener('keyup', this._onKeyUp);
+    this._unregisterPropertiesHover?.();
+  }
+
+  async loadSettings(): Promise<void> {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+    this.definitionStore.updateFolder(this.settings.definitionFolder);
+  }
+
+  private async openView(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    if (existing.length > 0) {
+      void this.app.workspace.revealLeaf(existing[0]!);
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (leaf) {
+      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+      void this.app.workspace.revealLeaf(leaf);
+    }
+  }
 }
