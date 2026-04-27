@@ -95,6 +95,48 @@ function inlineKeyDeleteRe(key: string, flags = 'gm'): RegExp {
 	);
 }
 
+/** Matches Dataview-style inline fields wrapped in parentheses: `(key:: value)` */
+const PAREN_FIELD_RE = /\(([A-Za-z0-9_][A-Za-z0-9_\- ]*)::\s*(.*?)\)/g;
+
+function parenKeyRe(key: string, flags = 'g'): RegExp {
+	return new RegExp(`(\\()(${escapeRegex(key)})(::\\s*.*?\\))`, flags);
+}
+
+function parenKeyValueRe(key: string, value: string, flags = 'g'): RegExp {
+	return new RegExp(`(\\(${escapeRegex(key)}::\\s*)${escapeRegex(value)}(\\s*\\))`, flags);
+}
+
+function parenKeyDeleteRe(key: string, flags = 'g'): RegExp {
+	return new RegExp(`(\\()${escapeRegex(key)}::\\s*.*?(\\))`, flags);
+}
+
+function parenKeyValueDeleteRe(key: string, value: string, flags = 'g'): RegExp {
+	return new RegExp(`(\\()${escapeRegex(key)}::\\s*${escapeRegex(value)}\\s*(\\))`, flags);
+}
+
+function extractInlineFields(line: string): { key: string, value: string }[] {
+	const fields: { key: string, value: string }[] = [];
+
+	const match = INLINE_FIELD_RE.exec(line);
+	if (match) {
+		const key = match[2]?.trim();
+		const value = match[3]?.trim() || '';
+		if (key) {
+			fields.push({ key, value });
+		}
+	} else {
+		const parenMatches = [...line.matchAll(/\(([A-Za-z0-9_][A-Za-z0-9_\- ]*)::\s*(.*?)\)/g)];
+		for (const m of parenMatches) {
+			const key = m[1]?.trim();
+			const value = m[2]?.trim() || '';
+			if (key) {
+				fields.push({ key, value });
+			}
+		}
+	}
+	return fields;
+}
+
 /** Safely converts an unknown vault value to a display string. */
 function stringify(v: unknown): string {
 	if (typeof v === 'string') return v;
@@ -186,15 +228,19 @@ async function buildIndex(app: App, plugin: MetadataWranglerPlugin): Promise<Map
 		const fmEnd = getFrontmatterEnd(content);
 		const body = content.slice(fmEnd);
 		for (const line of body.split('\n')) {
-			const match = INLINE_FIELD_RE.exec(line);
-			if (match == null) continue;
-			const key = match[2]?.trim();
-			const value = match[3]?.trim();
-			if (!key || !value) continue;
-			const field = upsert(`il::${key}`, key, 'inline');
-			field.files.add(file.path);
-			addVal(field, value, file.path);
-			mergeType(field, detectTypeFromString(value));
+			const fields = extractInlineFields(line);
+			for (const { key, value } of fields) {
+				if (!key) continue;
+				// Empty values (FK case) are valid — store as empty string, type = 'text'
+				const entry = upsert(`il::${key}`, key, 'inline');
+				entry.files.add(file.path);
+				if (value) {
+					addVal(entry, value, file.path);
+					mergeType(entry, detectTypeFromString(value));
+				} else {
+					mergeType(entry, 'text');
+				}
+			}
 		}
 	}
 
@@ -232,13 +278,15 @@ async function renameInlineKey(
 	newKey: string,
 ): Promise<void> {
 	const re = inlineKeyRe(oldKey);
+	const pRe = parenKeyRe(oldKey);
 	for (const path of files) {
 		const file = app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) continue;
 		try {
 			const content = await app.vault.read(file);
 			const fmEnd = getFrontmatterEnd(content);
-			const newBody = content.slice(fmEnd).replace(re, `$1${newKey}$3`);
+			let newBody = content.slice(fmEnd).replace(re, `$1${newKey}$3`);
+			newBody = newBody.replace(pRe, `$1${newKey}$3`);
 			if (newBody !== content.slice(fmEnd)) {
 				await app.vault.modify(file, content.slice(0, fmEnd) + newBody);
 			}
@@ -314,13 +362,15 @@ async function updateInlineValue(
 	newVal: string,
 ): Promise<void> {
 	const re = inlineKeyValueRe(key, oldVal);
+	const pRe = parenKeyValueRe(key, oldVal);
 	for (const path of files) {
 		const file = app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) continue;
 		try {
 			const content = await app.vault.read(file);
 			const fmEnd = getFrontmatterEnd(content);
-			const newBody = content.slice(fmEnd).replace(re, `$1${newVal}$2`);
+			let newBody = content.slice(fmEnd).replace(re, `$1${newVal}$2`);
+			newBody = newBody.replace(pRe, `$1${newVal}$2`);
 			if (newBody !== content.slice(fmEnd)) {
 				await app.vault.modify(file, content.slice(0, fmEnd) + newBody);
 			}
@@ -340,12 +390,14 @@ async function deleteEntireFrontmatterKey(app: App, filePath: string, key: strin
 
 async function deleteAllInlineOccurrences(app: App, filePaths: string[], key: string) {
   const pattern = inlineKeyDeleteRe(key);
+  const pRe = parenKeyDeleteRe(key);
   for (const path of filePaths) {
     const file = app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) continue;
     const content = await app.vault.read(file);
     const fmEnd = getFrontmatterEnd(content);
-    const body = content.slice(fmEnd).replace(pattern, '');
+    let body = content.slice(fmEnd).replace(pattern, '');
+    body = body.replace(pRe, '');
     if (body !== content.slice(fmEnd)) {
       await app.vault.modify(file, content.slice(0, fmEnd) + body);
     }
@@ -362,17 +414,19 @@ async function deleteInlineValue(
 		`^(${INLINE_PREFIX_PAT})${escapeRegex(key)}::\\s*${escapeRegex(val)}\\s*$`,
 		'gm',
 	);
+	const pRe = parenKeyValueDeleteRe(key, val);
 	for (const path of files) {
 		const file = app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) continue;
 		try {
 			const content = await app.vault.read(file);
 			const fmEnd = getFrontmatterEnd(content);
-			const newBody = content.slice(fmEnd).replace(re, (_, prefix) => {
+			let newBody = content.slice(fmEnd).replace(re, (_, prefix) => {
 				const stripped = prefix.trimEnd();
 				if (/^[\s\-\*>]*(?:\[.\]\s*)?$/.test(stripped)) return '';
 				return stripped;
 			});
+			newBody = newBody.replace(pRe, '');
 			if (newBody !== content.slice(fmEnd)) {
 				await app.vault.modify(file, content.slice(0, fmEnd) + newBody);
 			}
