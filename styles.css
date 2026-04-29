@@ -694,3 +694,38 @@
   color: var(--text-muted);
   font-size: var(--font-smaller);
 }
+
+/* Field type selector in modal definition section */
+.pw-type-select {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  margin-bottom: var(--size-4-2, 8px);
+}
+.pw-type-select:focus {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+.pw-type-hint {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-top: -4px;
+  margin-bottom: 8px;
+  padding: 4px 6px;
+  background: var(--background-modifier-info);
+  border-radius: var(--radius-s);
+}
+
+/* Allowed-value EditorSuggest rows */
+.pw-value-suggest-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+}

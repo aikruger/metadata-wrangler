@@ -54,6 +54,7 @@ interface FieldDefinition {
   /** FieldSource scope: "frontmatter", "inline", or "both". */
   sourceScope: 'frontmatter' | 'inline' | 'both';
   /** Vault path to the definition note, e.g. "metadata/status.md". */
+  fieldType?: string;
   filePath: string;
   allowedValues: AllowedValue[];
 }
@@ -564,6 +565,18 @@ class DefinitionStore {
     this.cache.clear();
   }
 
+
+  async registerWithObsidian(name: string, type: string): Promise<void> {
+    const metadataTypeManager = (this.app as any).metadataTypeManager;
+    if (metadataTypeManager && typeof metadataTypeManager.setType === 'function') {
+      try {
+        await metadataTypeManager.setType(name, type);
+      } catch (e) {
+        console.error("Failed to register property type with Obsidian", e);
+      }
+    }
+  }
+
   // ── Persistence ──
 
   /** Ensure the definition folder exists. */
@@ -607,6 +620,7 @@ class DefinitionStore {
         sourceScope: (['frontmatter', 'inline', 'both'].includes(fm['sourceScope'] as string)
           ? fm['sourceScope']
           : 'both') as FieldDefinition['sourceScope'],
+        fieldType: (fm['fieldType'] as string) ?? undefined,
         filePath: file.path,
         allowedValues: Array.isArray(fm['allowedValues'])
           ? fm['allowedValues'].map((v: any) => ({
@@ -661,7 +675,7 @@ class DefinitionStore {
       ? `allowedValues:\n${def.allowedValues.map(av => `  - value: ${av.value}\n    label: "${(av.label || '').replace(/"/g, '\\"')}"`).join('\n')}`
       : 'allowedValues: []';
     const content =
-      `---\nname: "${def.name}"\ndescription: "${def.description.replace(/"/g, '\\"')}"\nsourceScope: ${def.sourceScope}\n${aliasesYaml}\ngroup: "${def.group}"\nsubgroup: "${def.subgroup}"\n${allowedValuesYaml}\n---\n\n# ${def.name}\n\n${def.description}\n`;
+      `---\nname: "${def.name}"\ndescription: "${def.description.replace(/"/g, '\\"')}"\nsourceScope: ${def.sourceScope}\nfieldType: ${def.fieldType ?? 'text'}\n${aliasesYaml}\ngroup: "${def.group}"\nsubgroup: "${def.subgroup}"\n${allowedValuesYaml}\n---\n\n# ${def.name}\n\n${def.description}\n`;
 
     const existing = this.app.vault.getAbstractFileByPath(filePath);
     if (existing instanceof TFile) {
@@ -983,9 +997,11 @@ class FieldEditModal extends Modal {
 			text: `Field: ${this.field.name}`,
 		});
 
-		contentEl.createEl('p', {
-			cls: 'pw-source-info',
-			text: `Source: ${this.field.source === 'frontmatter' ? 'Frontmatter [p]' : 'Inline field [i]'}  ·  Type: ${this.field.fieldType}  ·  ${this.field.files.size} file${this.field.files.size !== 1 ? 's' : ''}`,
+		contentEl.createEl("p", {
+			cls: "pw-source-info",
+			text: `Source: ${
+				this.field.source === "frontmatter" ? "Frontmatter ⊞" : "Inline field ⊟"
+			}  ·  ${this.field.files.size} file${this.field.files.size !== 1 ? "s" : ""}`,
 		});
 
 		// Rename section
@@ -1036,6 +1052,32 @@ class FieldEditModal extends Modal {
 		subgroupInput.value = existingDef?.subgroup ?? '';
 		subgroupInput.placeholder = 'e.g. Administrative, Creative';
 
+		defSection.createEl("label", { cls: "pw-label", text: "Field type" });
+		const typeSelect = defSection.createEl("select", { cls: "pw-type-select" });
+
+		const typeOptions = [
+		  { value: "text",      label: "Text" },
+		  { value: "number",    label: "Number" },
+		  { value: "checkbox",  label: "Checkbox" },
+		  { value: "date",      label: "Date" },
+		  { value: "datetime",  label: "Date & time" },
+		  { value: "list",      label: "List (multi-value)" },
+		];
+		for (const opt of typeOptions) {
+		  const optEl = typeSelect.createEl("option", { value: opt.value, text: opt.label });
+		  const currentType = existingDef?.fieldType ?? this.field.fieldType ?? "text";
+		  if (optEl.value === currentType) optEl.selected = true;
+		}
+
+		const inferredType = this.field.fieldType ?? "unknown";
+		const defType = existingDef?.fieldType;
+		if (defType && defType !== inferredType && inferredType !== "unknown") {
+		  const hintEl = defSection.createEl("small", { cls: "pw-type-hint" });
+		  hintEl.setText(
+		    `ℹ Inferred from notes: "${inferredType}". Saving will set the definition type to your selection.`
+		  );
+		}
+
 		// Save + Open definition buttons
 		const defActionRow = defSection.createDiv({ cls: 'pw-rename-row' });
 		const saveDefBtn = defActionRow.createEl('button', {
@@ -1062,6 +1104,7 @@ class FieldEditModal extends Modal {
 		      .filter(Boolean),
 		    group: groupInput.value.trim(),
 		    subgroup: subgroupInput.value.trim(),
+		    fieldType: typeSelect.value,
 		    sourceScope: this.field.source === 'frontmatter'
 		      ? 'frontmatter'
 		      : this.field.source === 'inline'
@@ -1230,6 +1273,7 @@ class FieldEditModal extends Modal {
 	  btn.textContent = 'Saving…';
 	  try {
 	    await this.plugin.definitionStore.save(def);
+	    await this.plugin.definitionStore.registerWithObsidian(def.name, def.fieldType ?? "text");
 	    new Notice(`Definition for "${def.name}" saved.`);
 	    btn.textContent = 'Saved ✓';
 	    btn.disabled = false;
@@ -1888,6 +1932,8 @@ export default class MetadataWranglerPlugin extends Plugin {
       name: 'Open view',
       callback: () => { void this.openView(); },
     });
+
+    this.registerEditorSuggest(new AllowedValueSuggest(this));
 
     this.addCommand({
       id: 'insert-inline-field',
