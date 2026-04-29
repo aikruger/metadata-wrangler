@@ -1,3 +1,4 @@
+import { AllowedValueSuggest } from "./editor/allowed-value-suggest";
 import {
 	App,
 	Editor,
@@ -32,6 +33,13 @@ interface FieldInfo {
 }
 
 /** User-authored definition attached to a field from the registry folder. */
+
+interface AllowedValue {
+  value: string;
+  label?: string;
+  description?: string;
+}
+
 interface FieldDefinition {
   /** Canonical field name — must match the indexed FieldInfo.name exactly. */
   name: string;
@@ -46,7 +54,9 @@ interface FieldDefinition {
   /** FieldSource scope: "frontmatter", "inline", or "both". */
   sourceScope: 'frontmatter' | 'inline' | 'both';
   /** Vault path to the definition note, e.g. "metadata/status.md". */
+  fieldType?: string;
   filePath: string;
+  allowedValues: AllowedValue[];
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -555,6 +565,18 @@ class DefinitionStore {
     this.cache.clear();
   }
 
+
+  async registerWithObsidian(name: string, type: string): Promise<void> {
+    const metadataTypeManager = (this.app as any).metadataTypeManager;
+    if (metadataTypeManager && typeof metadataTypeManager.setType === 'function') {
+      try {
+        await metadataTypeManager.setType(name, type);
+      } catch (e) {
+        console.error("Failed to register property type with Obsidian", e);
+      }
+    }
+  }
+
   // ── Persistence ──
 
   /** Ensure the definition folder exists. */
@@ -598,7 +620,14 @@ class DefinitionStore {
         sourceScope: (['frontmatter', 'inline', 'both'].includes(fm['sourceScope'] as string)
           ? fm['sourceScope']
           : 'both') as FieldDefinition['sourceScope'],
+        fieldType: (fm['fieldType'] as string) ?? undefined,
         filePath: file.path,
+        allowedValues: Array.isArray(fm['allowedValues'])
+          ? fm['allowedValues'].map((v: any) => ({
+              value: String(v?.value ?? v ?? "").trim(),
+              label: typeof v?.label === "string" ? v.label.trim() : "",
+            })).filter((v: any) => v.value.length > 0)
+          : [],
       };
     } catch {
       return null;
@@ -642,8 +671,11 @@ class DefinitionStore {
       def.aliases.length > 0
         ? `aliases:\n${def.aliases.map((a) => `  - "${a}"`).join('\n')}`
         : 'aliases: []';
+    const allowedValuesYaml = def.allowedValues && def.allowedValues.length > 0
+      ? `allowedValues:\n${def.allowedValues.map(av => `  - value: ${av.value}\n    label: "${(av.label || '').replace(/"/g, '\\"')}"`).join('\n')}`
+      : 'allowedValues: []';
     const content =
-      `---\nname: "${def.name}"\n${aliasesYaml}\ndescription: "${def.description.replace(/"/g, '\\"')}"\ngroup: "${def.group}"\nsubgroup: "${def.subgroup}"\nsourceScope: ${def.sourceScope}\n---\n\n# ${def.name}\n\n${def.description}\n`;
+      `---\nname: "${def.name}"\ndescription: "${def.description.replace(/"/g, '\\"')}"\nsourceScope: ${def.sourceScope}\nfieldType: ${def.fieldType ?? 'text'}\n${aliasesYaml}\ngroup: "${def.group}"\nsubgroup: "${def.subgroup}"\n${allowedValuesYaml}\n---\n\n# ${def.name}\n\n${def.description}\n`;
 
     const existing = this.app.vault.getAbstractFileByPath(filePath);
     if (existing instanceof TFile) {
@@ -965,9 +997,11 @@ class FieldEditModal extends Modal {
 			text: `Field: ${this.field.name}`,
 		});
 
-		contentEl.createEl('p', {
-			cls: 'pw-source-info',
-			text: `Source: ${this.field.source === 'frontmatter' ? 'Frontmatter [p]' : 'Inline field [i]'}  ·  Type: ${this.field.fieldType}  ·  ${this.field.files.size} file${this.field.files.size !== 1 ? 's' : ''}`,
+		contentEl.createEl("p", {
+			cls: "pw-source-info",
+			text: `Source: ${
+				this.field.source === "frontmatter" ? "Frontmatter ⊞" : "Inline field ⊟"
+			}  ·  ${this.field.files.size} file${this.field.files.size !== 1 ? "s" : ""}`,
 		});
 
 		// Rename section
@@ -1018,6 +1052,32 @@ class FieldEditModal extends Modal {
 		subgroupInput.value = existingDef?.subgroup ?? '';
 		subgroupInput.placeholder = 'e.g. Administrative, Creative';
 
+		defSection.createEl("label", { cls: "pw-label", text: "Field type" });
+		const typeSelect = defSection.createEl("select", { cls: "pw-type-select" });
+
+		const typeOptions = [
+		  { value: "text",      label: "Text" },
+		  { value: "number",    label: "Number" },
+		  { value: "checkbox",  label: "Checkbox" },
+		  { value: "date",      label: "Date" },
+		  { value: "datetime",  label: "Date & time" },
+		  { value: "list",      label: "List (multi-value)" },
+		];
+		for (const opt of typeOptions) {
+		  const optEl = typeSelect.createEl("option", { value: opt.value, text: opt.label });
+		  const currentType = existingDef?.fieldType ?? this.field.fieldType ?? "text";
+		  if (optEl.value === currentType) optEl.selected = true;
+		}
+
+		const inferredType = this.field.fieldType ?? "unknown";
+		const defType = existingDef?.fieldType;
+		if (defType && defType !== inferredType && inferredType !== "unknown") {
+		  const hintEl = defSection.createEl("small", { cls: "pw-type-hint" });
+		  hintEl.setText(
+		    `ℹ Inferred from notes: "${inferredType}". Saving will set the definition type to your selection.`
+		  );
+		}
+
 		// Save + Open definition buttons
 		const defActionRow = defSection.createDiv({ cls: 'pw-rename-row' });
 		const saveDefBtn = defActionRow.createEl('button', {
@@ -1044,18 +1104,56 @@ class FieldEditModal extends Modal {
 		      .filter(Boolean),
 		    group: groupInput.value.trim(),
 		    subgroup: subgroupInput.value.trim(),
+		    fieldType: typeSelect.value,
 		    sourceScope: this.field.source === 'frontmatter'
 		      ? 'frontmatter'
 		      : this.field.source === 'inline'
 		      ? 'inline'
 		      : 'both',
 		    filePath: existingDef?.filePath ?? '',
+		    allowedValues: existingDef?.allowedValues ?? [],
 		  }, saveDefBtn);
 		});
 
 		// Values section
 		contentEl.createEl('h3', { cls: 'pw-section-title', text: 'Values' });
-		const valuesContainer = contentEl.createDiv({ cls: 'pw-values-container' });
+		const valuesSection = contentEl.createDiv({ cls: 'pw-values-section' });
+
+		// --- NEW: add-allowed-value row at the top ---
+		const def = this.plugin.definitionStore.resolve(this.field.name);
+		const addRow = valuesSection.createDiv({ cls: 'pw-add-value-row' });
+		const addInput = addRow.createEl('input', {
+			cls: 'pw-edit-input',
+			type: 'text',
+			placeholder: 'Add allowed value…',
+		});
+		const addLabelInput = addRow.createEl('input', {
+			cls: 'pw-edit-input pw-add-label-input',
+			type: 'text',
+			placeholder: 'Label (optional)',
+		});
+		const addBtn = addRow.createEl('button', {
+			cls: 'pw-btn pw-btn-primary',
+			text: '+ Add',
+		});
+
+		addInput.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') addBtn.click();
+		});
+
+		addBtn.addEventListener('click', async () => {
+			const val = addInput.value.trim();
+			if (!val) {
+				addInput.focus();
+				return;
+			}
+			await this.handleAddAllowedValue(val, addLabelInput.value.trim());
+			addInput.value = '';
+			addLabelInput.value = '';
+			addInput.focus();
+		});
+
+		const valuesContainer = valuesSection.createDiv({ cls: 'pw-values-container' });
 		this.renderValues(valuesContainer);
 
 		// Convert / Copy section
@@ -1175,6 +1273,7 @@ class FieldEditModal extends Modal {
 	  btn.textContent = 'Saving…';
 	  try {
 	    await this.plugin.definitionStore.save(def);
+	    await this.plugin.definitionStore.registerWithObsidian(def.name, def.fieldType ?? "text");
 	    new Notice(`Definition for "${def.name}" saved.`);
 	    btn.textContent = 'Saved ✓';
 	    btn.disabled = false;
@@ -1231,72 +1330,200 @@ class FieldEditModal extends Modal {
 		this.onRefresh();
 	}
 
-	private renderValues(container: HTMLElement): void {
-		container.empty();
-		if (this.field.values.size === 0) {
-			container.createDiv({ cls: 'pw-empty', text: 'No values.' });
+	async handleAddAllowedValue(value: string, label: string): Promise<void> {
+		const existing = this.plugin.definitionStore.resolve(this.field.name);
+		const currentAllowed: AllowedValue[] = existing?.allowedValues ?? [];
+
+		if (currentAllowed.some(av => av.value.toLowerCase() === value.toLowerCase())) {
+			new Notice(`"${value}" is already an allowed value.`);
 			return;
 		}
-		for (const [value, info] of this.field.values) {
-			this.renderValueRow(container, value, info);
-		}
+
+		const newAllowed: AllowedValue[] = [...currentAllowed, { value, label }];
+
+		const defToSave: FieldDefinition = existing
+			? { ...existing, allowedValues: newAllowed }
+			: {
+					name: this.field.name,
+					sourceScope: this.field.source === 'frontmatter' ? 'frontmatter'
+							 : this.field.source === 'inline'       ? 'inline'
+							 : 'both',
+					aliases: [],
+					description: '',
+					group: '',
+					subgroup: '',
+					filePath: '',
+					allowedValues: newAllowed,
+				};
+
+		await this.plugin.definitionStore.save(defToSave);
+		new Notice(`Added "${value}" as an allowed value for "${this.field.name}".`);
+
+		const container = this.contentEl.querySelector('.pw-values-container') as HTMLElement;
+		if (container) this.renderValues(container);
 	}
 
-	private renderValueRow(
-		container: HTMLElement,
-		value: string,
-		info: ValueInfo,
-	): void {
-		const row = container.createDiv({ cls: 'pw-value-row' });
+	async handleRemoveAllowedValue(value: string): Promise<void> {
+		const def = this.plugin.definitionStore.resolve(this.field.name);
+		if (!def) return;
 
-		// Header row: value text + file count toggle
-		const header = row.createDiv({ cls: 'pw-value-header' });
-		header.createEl('span', {
-			cls: 'pw-value-text',
-			text: value === '' ? '(empty)' : value,
-		});
-		const toggle = header.createEl('button', {
-			cls: 'pw-btn pw-btn-ghost',
-			text: `${info.files.size} file${info.files.size !== 1 ? 's' : ''}`,
-			title: 'Toggle file list',
-		});
+		const newAllowed = def.allowedValues.filter(
+			av => av.value.toLowerCase() !== value.toLowerCase()
+		);
+		await this.plugin.definitionStore.save({ ...def, allowedValues: newAllowed });
+		new Notice(`Removed "${value}" from allowed values.`);
 
-		// File list (hidden by default)
-		const fileList = row.createDiv({ cls: 'pw-file-list pw-hidden' });
-		toggle.addEventListener('click', () => {
-			fileList.toggleClass('pw-hidden', !fileList.hasClass('pw-hidden'));
-		});
-		for (const path of info.files) {
-			const entry = fileList.createDiv({ cls: 'pw-file-entry' });
-			const link = entry.createEl('a', { cls: 'pw-file-link', text: path });
-			link.addEventListener('click', () => {
-				const f = this.app.vault.getAbstractFileByPath(path);
-				if (f instanceof TFile) {
-					void this.app.workspace.getLeaf().openFile(f);
-					this.close();
-				}
+		const container = this.contentEl.querySelector('.pw-values-container') as HTMLElement;
+		if (container) this.renderValues(container);
+	}
+
+	private renderValues(container: HTMLElement): void {
+		container.empty();
+		const def = this.plugin.definitionStore.resolve(this.field.name);
+		const allowedValues: AllowedValue[] = def?.allowedValues ?? [];
+
+		type MergedRow = {
+			value: string;
+			observed: boolean;
+			allowed: boolean;
+			occurrences?: ValueInfo;
+			label?: string;
+		};
+
+		const rows = new Map<string, MergedRow>();
+
+		for (const [value, occurrences] of this.field.values) {
+			rows.set(value, {
+				value,
+				observed: true,
+				allowed: false,
+				occurrences,
 			});
 		}
 
-		// Action buttons
-		const actions = row.createDiv({ cls: 'pw-value-actions' });
-		const editBtn = actions.createEl('button', {
-			cls: 'pw-btn pw-btn-secondary',
-			text: 'Edit',
-		});
-		const deleteBtn = actions.createEl('button', {
-			cls: 'pw-btn pw-btn-danger',
-			text: 'Delete',
+		for (const av of allowedValues) {
+			if (rows.has(av.value)) {
+				rows.get(av.value)!.allowed = true;
+				rows.get(av.value)!.label = av.label || undefined;
+			} else {
+				rows.set(av.value, {
+					value: av.value,
+					observed: false,
+					allowed: true,
+					label: av.label || undefined,
+				});
+			}
+		}
+
+		if (rows.size === 0) {
+			container.createDiv({ cls: 'pw-empty', text: 'No values.' });
+			return;
+		}
+
+		const sorted = [...rows.values()].sort((a, b) => {
+			const rank = (r: MergedRow) =>
+				r.observed && r.allowed ? 0 :
+				r.observed              ? 1 : 2;
+			return rank(a) - rank(b) || a.value.localeCompare(b.value);
 		});
 
-		editBtn.addEventListener('click', () => {
-			this.showEditInput(row, editBtn, value, info);
-		});
-		deleteBtn.addEventListener('click', () => {
-			void this.handleDeleteValue(value, info);
-		});
+		for (const row of sorted) {
+			this.renderMergedValueRow(container, row, def || null);
+		}
 	}
 
+	private renderMergedValueRow(
+		container: HTMLElement,
+		row: any,
+		def: FieldDefinition | null
+	): void {
+		const rowEl = container.createDiv({
+			cls: `pw-value-row${!row.observed ? " pw-value-defined-only" : ""}`,
+		});
+
+		const header = rowEl.createDiv({ cls: "pw-value-header" });
+
+		const valueTextEl = header.createEl("span", {
+			cls: "pw-value-text",
+			text: row.value === "" && row.observed ? "(empty)" : row.value,
+		});
+		if (row.label) {
+			header.createEl("span", {
+				cls: "pw-value-label",
+				text: row.label,
+			});
+		}
+
+		if (!row.observed && row.allowed) {
+			header.createEl("span", {
+				cls: "pw-badge pw-badge-defined",
+				text: "defined only",
+				title: "This value is listed as allowed in the definition but has not been used in any note yet.",
+			});
+		} else if (row.observed && row.allowed) {
+			header.createEl("span", {
+				cls: "pw-badge pw-badge-allowed",
+				text: "✓ allowed",
+				title: "This value is both observed in notes and listed as an allowed value in the definition.",
+			});
+		}
+
+		if (row.observed && row.occurrences) {
+			const fileToggle = header.createEl("button", {
+				cls: "pw-btn pw-btn-ghost",
+				text: `${row.occurrences.files.size} file${row.occurrences.files.size !== 1 ? "s" : ""}`,
+				title: "Toggle file list",
+			});
+			const fileList = rowEl.createDiv({ cls: "pw-file-list pw-hidden" });
+			fileToggle.addEventListener("click", () => {
+				fileList.toggleClass("pw-hidden", !fileList.hasClass("pw-hidden"));
+			});
+			for (const filePath of row.occurrences.files) {
+				const entry = fileList.createDiv({ cls: "pw-file-entry" });
+				const link = entry.createEl("a", { cls: "pw-file-link", text: filePath });
+				link.addEventListener("click", () => {
+					const f = this.app.vault.getAbstractFileByPath(filePath);
+					if (f instanceof TFile) {
+						void this.app.workspace.getLeaf().openFile(f);
+						this.close();
+					}
+				});
+			}
+		}
+
+		const actions = rowEl.createDiv({ cls: "pw-value-actions" });
+
+		if (row.observed) {
+			const editBtn = actions.createEl("button", { cls: "pw-btn pw-btn-secondary", text: "Edit" });
+			const deleteBtn = actions.createEl("button", { cls: "pw-btn pw-btn-danger", text: "Delete from notes" });
+			editBtn.addEventListener("click", () =>
+				this.showEditInput(rowEl, editBtn, row.value, row.occurrences!)
+			);
+			deleteBtn.addEventListener("click", () =>
+				this.handleDeleteValue(row.value, row.occurrences!)
+			);
+		}
+
+		if (row.allowed) {
+			const removeAllowedBtn = actions.createEl("button", {
+				cls: "pw-btn pw-btn-ghost",
+				text: "Remove from allowed",
+				title: "Remove this value from the definition's allowed list without changing any notes.",
+			});
+			removeAllowedBtn.addEventListener("click", () =>
+				this.handleRemoveAllowedValue(row.value)
+			);
+		} else if (row.observed) {
+			const promoteBtn = actions.createEl("button", {
+				cls: "pw-btn pw-btn-ghost",
+				text: "Add to allowed",
+				title: "Add this observed value to the definition's allowed list.",
+			});
+			promoteBtn.addEventListener("click", () =>
+				this.handleAddAllowedValue(row.value, "")
+			);
+		}
+	}
 	private showEditInput(
 		row: HTMLElement,
 		editBtn: HTMLButtonElement,
@@ -1705,6 +1932,8 @@ export default class MetadataWranglerPlugin extends Plugin {
       name: 'Open view',
       callback: () => { void this.openView(); },
     });
+
+    this.registerEditorSuggest(new AllowedValueSuggest(this));
 
     this.addCommand({
       id: 'insert-inline-field',

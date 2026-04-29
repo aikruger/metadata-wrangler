@@ -639,3 +639,93 @@
   overflow: visible !important;
   position: relative;
 }
+
+/* Add-allowed-value row at top of Values section */
+.pw-add-value-row {
+  display: flex;
+  gap: var(--size-4-2, 8px);
+  align-items: center;
+  padding: var(--size-4-2, 8px) 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: var(--size-4-2, 8px);
+}
+.pw-add-label-input {
+  max-width: 140px;
+  color: var(--text-muted);
+}
+
+/* Defined-only value rows */
+.pw-value-defined-only {
+  opacity: 0.75;
+  background: color-mix(in oklch, var(--background-modifier-info) 30%, transparent);
+  border-radius: var(--radius-s);
+  padding: 2px 4px;
+}
+
+/* Value state badges */
+.pw-badge {
+  font-size: var(--font-smaller);
+  padding: 1px 6px;
+  border-radius: var(--radius-s);
+  font-weight: 500;
+}
+.pw-badge-defined {
+  background: var(--background-modifier-info);
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+}
+.pw-badge-allowed {
+  background: var(--background-modifier-success);
+  color: var(--text-normal);
+}
+
+/* Optional label next to value text */
+.pw-value-label {
+  color: var(--text-muted);
+  font-size: var(--font-smaller);
+  font-style: italic;
+  margin-left: 6px;
+}
+
+/* EditorSuggest rows */
+.pw-suggest-value { display: block; }
+.pw-suggest-value-label {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--font-smaller);
+}
+
+/* Field type selector in modal definition section */
+.pw-type-select {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+  margin-bottom: var(--size-4-2, 8px);
+}
+.pw-type-select:focus {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+.pw-type-hint {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  margin-top: -4px;
+  margin-bottom: 8px;
+  padding: 4px 6px;
+  background: var(--background-modifier-info);
+  border-radius: var(--radius-s);
+}
+
+/* Allowed-value EditorSuggest rows */
+.pw-value-suggest-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 8px;
+}
